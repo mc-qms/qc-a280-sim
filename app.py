@@ -1,3 +1,4 @@
+import os
 import re
 from openai import OpenAI
 import streamlit as st
@@ -13,11 +14,19 @@ st.set_page_config(
 # --- CLIENT & SECRETS INITIALIZATION ---
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-    SYSTEM_SPEC = st.secrets["QC_SIM_SPEC"]
 except KeyError as e:
     st.error(
-        f"Missing configuration secret: {e}. Define GROQ_API_KEY and QC_SIM_SPEC in Streamlit Secrets."
+        f"Missing configuration secret: {e}. Define GROQ_API_KEY in Streamlit Secrets."
     )
+    st.stop()
+
+# Load system instructions from repository file
+prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+try:
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        SYSTEM_SPEC = f.read()
+except FileNotFoundError:
+    st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
 client = OpenAI(
