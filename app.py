@@ -91,7 +91,7 @@ def clean_state_token(text: str) -> str:
 
 
 def run_llm_turn(user_input: str):
-    """Executes turn with deterministic physics, strict math evaluation, and template enforcement."""
+    """Executes turn with deterministic physics, direct Python disposition emit, and template enforcement."""
     actual_api_prompt = user_input
     u_lower = user_input.lower().strip()
 
@@ -110,14 +110,19 @@ def run_llm_turn(user_input: str):
                 "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
                 "the instrument is off, and reminds analyst to power on and review TM-0428 Section 4 before asking for review.]"
             )
-        # Hierarchy 2: COMPOUND FAILURE (Neat AND Invalid Blank [NONE or WATER])
+        # Hierarchy 2: COMPOUND FAILURE (Fatal First: Invalid Blank + Neat Sample)
         elif measured_state == "YES" and blank_state != "BUFFER" and st.session_state.last_reading_over_range:
-            blank_desc = "missing baseline zero (§5.1)" if blank_state == "NONE" else "Milli-Q Water blank instead of Formulation Buffer (§5.1)"
+            blank_desc = (
+                "complete omission of a baseline zero (§5.1)"
+                if blank_state == "NONE"
+                else "using Milli-Q Water instead of Formulation Buffer (§5.1)"
+            )
             actual_api_prompt = (
-                f"Call Supervisor [DIRECTOR NOTE: Analyst ran neat sample with an invalid baseline ({blank_desc}). "
-                "Supervisor inspects the raw trace and catches BOTH errors: invalid baseline (§5.1) AND undiluted sample (§5.2). "
-                "Firmly clarifies that Section 5.3 re-preparation only protects compliant runs that overshoot, NOT runs where basic method "
-                "prerequisites were skipped. Since raw GMP data was acquired under non-compliant conditions, the run must be aborted. "
+                f"Call Supervisor [DIRECTOR NOTE: Analyst committed a compound procedural failure. "
+                f"Supervisor inspects the printout and leads FATAL-FIRST: First, calls out the {blank_desc}, which completely "
+                "invalidates the optical baseline. Second, calls out the undiluted sample preparation (§5.2) that saturated the detector at 2.84 AU. "
+                "Firmly clarifies that Section 5.3 re-preparation only protects compliant dilutions that overshoot, NOT runs where foundational "
+                "method prerequisites were skipped. Since raw GMP data was acquired under non-compliant conditions, the run must be aborted. "
                 "Logs in-process non-conformance DEV-QC-SETUP-FAIL for the aborted run, and tells analyst to reset the bench and start clean.]"
             )
         # Hierarchy 3: Over-Range ONLY (Properly Blanked with Formulation Buffer, §5.3 Concession Valid)
@@ -244,6 +249,7 @@ def run_llm_turn(user_input: str):
                     f"so the assay values are not revealed. Do not perform the calculation yet.]"
                 )
             else:
+                # Arithmetic reconciliation against bench trace
                 r = st.session_state.last_readings or {
                     "rep1_280": 0.781,
                     "rep1_320": 0.006,
@@ -258,7 +264,6 @@ def run_llm_turn(user_input: str):
                 val_df = float(nums[2])
                 val_coeff = float(nums[3])
 
-                # Check if entries reconcile with raw bench trace and method parameters
                 diff_a1 = abs(val_a1 - exp_a1)
                 diff_a2 = abs(val_a2 - exp_a2)
                 diff_coeff = abs(val_coeff - 1.45)
@@ -278,7 +283,7 @@ def run_llm_turn(user_input: str):
                     mean_conc = (mean_a * val_df) / val_coeff
                     pct_diff = (abs(conc1 - conc2) / mean_conc) * 100.0
 
-                    # Evaluate procedural compliance
+                    # Evaluate compliance
                     is_ready = power_state.startswith("READY")
                     is_buffer_blank = blank_state == "BUFFER"
                     is_buffer_prep = prep_state == "DILUTED_BUFFER"
@@ -296,7 +301,9 @@ def run_llm_turn(user_input: str):
                             f"- Mean Corrected Absorbance (Mean A_corr): {mean_a:.3f} AU (Calculated)\n"
                             f"- Dilution Factor Applied: {int(val_df)}\n"
                             "- Extinction Coefficient Used: 1.45 mL / (mg · cm)\n"
-                            f"- Reported Protein Concentration (Mean_Conc): {mean_conc:.1f} mg/mL (Target: 50–60 mg/mL)\n"
+                            f"- Replicate 1 Protein Concentration (Conc_1): {conc1:.2f} mg/mL\n"
+                            f"- Replicate 2 Protein Concentration (Conc_2): {conc2:.2f} mg/mL\n"
+                            f"- Reported Protein Concentration (Mean_Conc): {mean_conc:.2f} mg/mL (Target: 50–60 mg/mL)\n"
                             f"- Duplicate % Difference: {pct_diff:.2f}% (Acceptance Criteria: <= 2.0%)\n\n"
                             "QC Review: Method TM-0428 executed in full compliance. Lamp thermal stabilization confirmed, "
                             "matrix-matched Formulation Buffer blank verified, duplicate preparations within validated "
@@ -314,7 +321,7 @@ def run_llm_turn(user_input: str):
                             findings.append(
                                 "Section 5.1 Non-Compliance: Sample scanned without valid baseline zero. TM-0428 requires "
                                 "baseline zero against Formulation Buffer; raw data record lacks blank entry, resulting in "
-                                f"uncompensated optical background and gross positive matrix bias (~{mean_conc:.1f} mg/mL vs 50–60 mg/mL target)."
+                                f"uncompensated optical background and gross positive matrix bias (~{mean_conc:.2f} mg/mL vs 50–60 mg/mL target)."
                             )
                         elif blank_state == "WATER":
                             findings.append(
@@ -351,7 +358,9 @@ def run_llm_turn(user_input: str):
                             "--------------------------------------------------------------------------------\n"
                             f"- Replicate 1 Corrected Absorbance: {val_a1:.3f} AU\n"
                             f"- Replicate 2 Corrected Absorbance: {val_a2:.3f} AU\n"
-                            f"- Calculated Mean Concentration (Mean_Conc): {mean_conc:.1f} mg/mL (Analytical Artifact)\n"
+                            f"- Replicate 1 Protein Concentration (Conc_1): {conc1:.2f} mg/mL\n"
+                            f"- Replicate 2 Protein Concentration (Conc_2): {conc2:.2f} mg/mL\n"
+                            f"- Calculated Mean Concentration (Mean_Conc): {mean_conc:.2f} mg/mL (Analytical Artifact)\n"
                             f"- Duplicate % Difference: {pct_diff:.2f}%\n\n"
                             "QC Review Findings:\n"
                             f"- {findings_str}\n\n"
@@ -361,13 +370,21 @@ def run_llm_turn(user_input: str):
                             "================================================================================"
                         )
 
-                    actual_api_prompt = (
-                        f"{user_input} [DIRECTOR NOTE: Technical review complete. Output the following "
-                        f"analytical summary block verbatim in your response with no alterations:\n"
-                        f"{summary_block}]"
+                    # DIRECT PYTHON EMIT (Bypasses LLM probabilistic generation entirely)
+                    state_token = f"STATE: [Power: {power_state} | Blank: {blank_state} | Prep: {prep_state} | Measured: YES | In-Range: {'YES' if is_in_range else 'NO'} | SupCalls: 0]"
+                    st.session_state.api_messages.append({"role": "user", "content": user_input})
+                    st.session_state.api_messages.append(
+                        {"role": "assistant", "content": f"{state_token}\n\n{summary_block}"}
                     )
+                    st.session_state.display_messages.append({"role": "user", "content": user_input})
+                    st.session_state.display_messages.append(
+                        {"role": "assistant", "content": summary_block, "state": state_token}
+                    )
+                    return
 
-    # Sliding window: keep only the most recent 6 messages to protect token budget
+    # =========================================================================
+    # 4. LLM INFERENCE ENGINE (DIALOGUE & PHYSICAL ACTIONS)
+    # =========================================================================
     active_history = (
         st.session_state.api_messages[-6:]
         if len(st.session_state.api_messages) > 6
