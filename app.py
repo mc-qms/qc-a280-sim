@@ -60,6 +60,8 @@ if "last_readings" not in st.session_state:
     st.session_state.last_readings = None
 if "selecting_blank" not in st.session_state:
     st.session_state.selecting_blank = False
+if "cuvette_contents" not in st.session_state:
+    st.session_state.cuvette_contents = "EMPTY"
 
 
 def extract_state_token(raw_text: str) -> str:
@@ -106,7 +108,6 @@ def run_llm_turn(user_input: str):
     # 1. SUPERVISOR INTERACTION ROUTING
     # =========================================================================
     if any(k in u_lower for k in ["supervisor", "ask lead", "elevate"]):
-        # Hierarchy 1: Bench completely unpowered/cold
         if power_state.startswith("OFF"):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
@@ -114,7 +115,6 @@ def run_llm_turn(user_input: str):
                 "Switch it on, let the lamps stabilize per TM-0428 Section 4, and review the method before calling me.' "
                 "DO NOT write dialogue or actions for the analyst.]"
             )
-        # Hierarchy 2: COMPOUND FAILURE (Fatal First: Invalid Blank + Neat Sample)
         elif measured_state == "YES" and blank_state != "BUFFER" and st.session_state.last_reading_over_range:
             blank_desc = (
                 "complete omission of a baseline zero (§5.1)"
@@ -130,7 +130,6 @@ def run_llm_turn(user_input: str):
                 "Logs in-process non-conformance DEV-QC-SETUP-FAIL for the aborted run, and tells analyst to reset the bench and start clean. "
                 "DO NOT write dialogue or actions for the analyst.]"
             )
-        # Hierarchy 3: Over-Range ONLY (Properly Blanked with Formulation Buffer, §5.3 Concession Valid)
         elif st.session_state.last_reading_over_range and measured_state == "YES" and blank_state == "BUFFER":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU, but baseline zero with Formulation Buffer was stored properly. "
@@ -138,7 +137,6 @@ def run_llm_turn(user_input: str):
                 "re-preparation at an adjusted dilution is explicitly permitted on the spot and does NOT require raising an unplanned deviation. "
                 "DO NOT write dialogue or actions for the analyst.]"
             )
-        # Hierarchy 4: Invalid Blank ONLY (Diluted sample, but Blank is NONE or WATER)
         elif measured_state == "YES" and blank_state in ["NONE", "WATER"]:
             blank_desc = "without blanking (Blank: NONE)" if blank_state == "NONE" else "with Milli-Q Water instead of Formulation Buffer"
             actual_api_prompt = (
@@ -148,7 +146,6 @@ def run_llm_turn(user_input: str):
                 "for the aborted run, and tells them to scrap prep and re-initialize bench clean. "
                 "DO NOT write dialogue or actions for the analyst.]"
             )
-        # Hierarchy 5: Actual early blank error caught BEFORE scanning sample (Water Blank Stored)
         elif measured_state == "NO" and blank_state == "WATER":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Supervisor steps into the bay, glances at the PC monitor, and notices "
@@ -156,7 +153,6 @@ def run_llm_turn(user_input: str):
                 "no lot release data exists and no deviation is required. Instructs analyst to document a contemporaneous note in the raw log, "
                 "re-zero with Formulation Buffer once the lamp is ready, and proceed. DO NOT write dialogue or actions for the analyst.]"
             )
-        # Hierarchy 6: Routine Warmup Idling (Lamp warming, no sample scanned, no erroneous blank stored)
         elif "WARMING" in power_state and measured_state == "NO":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Supervisor walks into the bay and glances at the PC workstation monitor. "
@@ -165,7 +161,6 @@ def run_llm_turn(user_input: str):
                 "Don't page me just to watch a warm-up timer—use this time to read TM-0428 or get your pipettes and tubes organized.' "
                 "CRITICAL: DO NOT write dialogue or actions for the analyst. DO NOT do subtraction countdown math.]"
             )
-        # Hierarchy 7: Completed in-range measurements (~0.78 AU)
         elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for review of completed measurements. "
@@ -173,7 +168,6 @@ def run_llm_turn(user_input: str):
                 "0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 6.4. "
                 "DO NOT write dialogue or actions for the analyst.]"
             )
-        # Hierarchy 8: Bench ready and blanked, mid-assay check before measuring
         elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for a mid-assay sanity check. Supervisor confirms "
@@ -193,29 +187,41 @@ def run_llm_turn(user_input: str):
     elif any(k in u_lower for k in ["power on", "switch on", "turn on"]):
         actual_api_prompt = (
             f"{user_input} [DIRECTOR NOTE: Analyst flips the rocker switch on the spectrophotometer chassis. "
-            "Describe the physical hardware response: cooling fans spin up, D2 and tungsten lamps ignite, "
-            "and internal filter wheel clicks through self-check homing. "
+            "Describe the physical hardware response: cooling fan engages with a quiet whir, internal stepper motors "
+            "click as the monochromator and filter wheels complete homing alignment, and the front panel status LED illuminates solid green. "
+            "(The optical bench is sealed and light-tight; no visible glow escapes the chassis). "
             "On the PC workstation monitor, the UV-Vis software establishes connection and updates its status bar: "
             "'Hardware: Online | Lamps: Ignited | Status: LAMP WARMING (2 min / 20 min required)'. "
-            "CRITICAL: DO NOT do subtraction math (do not say 'needs 18 more minutes'). "
-            "DO NOT suggest next steps or reading TM-0428. Stop immediately after reporting software status.]"
+            "CRITICAL: DO NOT do subtraction math. DO NOT suggest next steps or reading TM-0428. "
+            "Stop immediately after reporting software status.]"
         )
 
     # =========================================================================
-    # 3. BLANKING ROUTING (HARDWARE & MATRIX DISAMBIGUATION)
+    # 3. BLANKING ROUTING (HARDWARE, WASH STATION & CUVETTE TRACKING)
     # =========================================================================
     elif "blank" in u_lower and not any(k in u_lower for k in ["calc", "supervisor"]):
         reagent = "Formulation Buffer" if "buffer" in u_lower else ("Milli-Q Water" if "water" in u_lower else "unknown")
         
+        # Determine if cuvette cleaning protocol is required
+        rinse_narrative = ""
+        if st.session_state.cuvette_contents != "EMPTY" and st.session_state.cuvette_contents != reagent:
+            rinse_narrative = (
+                f"Noticing the micro-cuvette previously contained {st.session_state.cuvette_contents}, the analyst takes it "
+                "to the wash station, aspirates the old liquid using the vacuum waste tip, flushes the cell with Milli-Q water "
+                "followed by reagent-grade ethanol, and dries it thoroughly. "
+            )
+
         if "OFF" in power_state:
+            st.session_state.cuvette_contents = reagent if reagent != "unknown" else st.session_state.cuvette_contents
             actual_api_prompt = (
                 f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: Instrument is POWER OFF. "
+                f"{rinse_narrative}"
                 f"The analyst pipettes {reagent if reagent != 'unknown' else 'solution'} into the quartz micro-cuvette using a P1000 pipettor, "
-                "wipes the exterior with a lint-free wipe, and seats it in the cell holder. "
+                "wipes optical faces with a lint-free wipe, and seats it in the cell holder. "
                 "However, the spectrophotometer power switch is OFF and the PC software shows 'Hardware: Offline'. "
                 "State that the optical bench is unenergized; no baseline can be acquired or stored. "
                 "CRITICAL: DO NOT cite TM-0428 warm-up requirements. DO NOT mention 20 minutes. "
-                "DO NOT advise the analyst on what to do next. Stop immediately after reporting the offline status.]"
+                "DO NOT advise the analyst on what to do next. Stop immediately after reporting offline status.]"
             )
         elif reagent == "unknown":
             actual_api_prompt = (
@@ -224,9 +230,12 @@ def run_llm_turn(user_input: str):
                 "Do NOT reveal which reagent is approved in TM-0428.]"
             )
         else:
+            st.session_state.cuvette_contents = reagent
             chosen_blank_token = "BUFFER" if "buffer" in u_lower else "WATER"
             actual_api_prompt = (
-                f"{user_input} [DIRECTOR NOTE: The analyst uses a calibrated P1000 pipettor to transfer {reagent} "
+                f"{user_input} [DIRECTOR NOTE: "
+                f"{rinse_narrative}"
+                f"The analyst uses a calibrated P1000 pipettor to transfer {reagent} "
                 "into the 10 mm quartz micro-cuvette, inspects optical windows, wipes them with a lint-free wipe, "
                 "and closes the sample compartment lid. In the workstation software, they click 'Zero / Baseline'. "
                 "The optical bench takes a baseline read and stores it. "
@@ -236,7 +245,49 @@ def run_llm_turn(user_input: str):
             )
 
     # =========================================================================
-    # 4. INSTRUMENT MEASUREMENT ROUTING (DETERMINISTIC OPTICAL ENGINE)
+    # 4. SAMPLE PREPARATION ROUTING (DETERMINISTIC DILUTION VALIDATION)
+    # =========================================================================
+    elif any(k in u_lower for k in ["prepare", "prep", "dilute"]) and "blank" not in u_lower:
+        is_neat = any(k in u_lower for k in ["neat", "undiluted", "direct"])
+        has_buffer = any(k in u_lower for k in ["buffer", "formulation"])
+        has_water = any(k in u_lower for k in ["water", "milli-q"])
+
+        # Check for 2-step serial dilution: 100 into 900 twice = 1:100
+        is_serial_100 = "serial" in u_lower and "100" in u_lower and "900" in u_lower
+        is_direct_100 = any(k in u_lower for k in ["1:100", "1/100", "1 to 100", "100-fold", "100x"])
+
+        if is_neat:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst pipettes neat, undiluted mAb Drug Substance directly into "
+                "duplicate microcentrifuge tubes. Confirm the preparation of duplicate neat preparations (Prep A and Prep B). "
+                "Update STATE to Prep: NEAT and Measured: NO. Stop immediately without advice.]"
+            )
+        elif (is_serial_100 or is_direct_100) and (has_buffer or not has_water):
+            math_explanation = (
+                "a two-step 1:10 serial dilution (100 µL into 900 µL Formulation Buffer, followed by 100 µL into 900 µL Formulation Buffer), "
+                "yielding a validated final dilution factor of 1:100 (DF = 100)"
+                if is_serial_100
+                else "a 1:100 dilution using Formulation Buffer as the diluent (DF = 100)"
+            )
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst executes duplicate sample preparations using {math_explanation}. "
+                "CRITICAL ARITHMETIC ENFORCEMENT: Confirm duplicate preparations (Prep A and Prep B) at 1:100 dilution factor. "
+                "DO NOT calculate or state 1:1000 (10x followed by 10x is strictly 1:100). "
+                "Describe pipetting with calibrated pipettors and vortexing tubes. Update STATE to Prep: DILUTED_BUFFER and Measured: NO. "
+                "Stop immediately without unsolicited advice.]"
+            )
+        elif (is_serial_100 or is_direct_100) and has_water:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst prepares duplicate samples using a 1:100 dilution factor, "
+                "but using Milli-Q Water as the diluent. Confirm duplicate preparations (Prep A and Prep B) at 1:100 in water. "
+                "Update STATE to Prep: DILUTED_WATER and Measured: NO. Stop immediately without unsolicited advice.]"
+            )
+        else:
+            # Let default handler or recursive disambiguation prompt run
+            actual_api_prompt = user_input
+
+    # =========================================================================
+    # 5. INSTRUMENT MEASUREMENT ROUTING (DETERMINISTIC OPTICAL ENGINE)
     # =========================================================================
     elif any(k in u_lower for k in ["measure", "scan"]) and "blank" not in u_lower:
         if "OFF" in power_state:
@@ -291,6 +342,9 @@ def run_llm_turn(user_input: str):
                 f"Prep B (Rep 2): A280 = {rep2_280:.3f} AU | A320 = {rep2_320:.3f} AU"
             )
 
+            # Measuring transfers sample into cuvette
+            st.session_state.cuvette_contents = "mAb Sample Preparation"
+
             actual_api_prompt = (
                 f"Measure sample preparations [DIRECTOR NOTE: Transcribe the following raw spectrophotometer "
                 f"data trace verbatim into your response, update STATE to Measured: YES, and do not provide "
@@ -299,7 +353,7 @@ def run_llm_turn(user_input: str):
             )
 
     # =========================================================================
-    # 5. CALCULATION & DISPOSITION ROUTING (DETERMINISTIC MATH ENGINE)
+    # 6. CALCULATION & DISPOSITION ROUTING (DETERMINISTIC MATH ENGINE)
     # =========================================================================
     elif any(k in u_lower for k in ["calc", "disposition"]):
         if measured_state != "YES":
@@ -452,7 +506,7 @@ def run_llm_turn(user_input: str):
                     return
 
     # =========================================================================
-    # 6. LLM INFERENCE ENGINE (DIALOGUE & PHYSICAL NARRATION)
+    # 7. LLM INFERENCE ENGINE (DIALOGUE & PHYSICAL NARRATION)
     # =========================================================================
     active_history = (
         st.session_state.api_messages[-6:]
@@ -605,6 +659,7 @@ with st.sidebar:
         st.session_state.last_reading_over_range = False
         st.session_state.last_readings = None
         st.session_state.selecting_blank = False
+        st.session_state.cuvette_contents = "EMPTY"
         st.rerun()
 
 # --- MAIN TERMINAL WORKSPACE ---
@@ -619,12 +674,12 @@ if len(st.session_state.display_messages) == 0:
         "You are logged in at Bench 4 to perform release testing for **mAb Drug Substance (Lot BDS-552)**.\n\n"
         "Target concentration is approximately **50–60 mg/mL**.\n\n"
         "**Current Bench Status:**\n"
-        "* **Spectrophotometer:** Benchtop dual-beam optical chassis is POWER OFF (Cold, 0 min). Indicator LED dark.\n"
+        "* **Spectrophotometer:** Benchtop dual-beam optical chassis is POWER OFF (Cold, 0 min). Optical bench is sealed and light-tight; front LED is dark.\n"
         "* **Workstation PC:** Data Station online; spectrophotometer control software shows `Hardware: Offline`.\n"
         "* **Equipment:** Calibrated pipettors (P20, P200, P1000) and barrier tips.\n"
         "* **Optics & Consumables:** 10 mm quartz micro-cuvette, microcentrifuge tubes, lint-free wipes.\n"
         "* **Sample:** 1x 2.0 mL vial of mAb Drug Substance (Lot BDS-552).\n"
-        "* **Reagents:** 1x 500 mL bottle of Formulation Buffer; 1x Milli-Q Water wash station.\n"
+        "* **Reagents & Wash:** 1x 500 mL bottle of Formulation Buffer; 1x wash station equipped with Milli-Q Water and reagent-grade Ethanol squeeze wash bottles, and a vacuum waste aspirator.\n"
         "* **Documentation:** Test Method binder **TM-0428** available in the sidebar document deck."
     )
     initial_state = "STATE: [Power: OFF (0 min) | Blank: NONE | Prep: NONE | Measured: NO | In-Range: UNTESTED | SupCalls: 0]"
@@ -675,6 +730,7 @@ if is_terminal:
         st.session_state.last_reading_over_range = False
         st.session_state.last_readings = None
         st.session_state.selecting_blank = False
+        st.session_state.cuvette_contents = "EMPTY"
         st.rerun()
 
 elif st.session_state.selecting_blank:
