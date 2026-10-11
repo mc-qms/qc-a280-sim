@@ -12,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="auto",
 )
 
-# --- CLIENT & SECRETS INITIALIZATION ---
+# --- CLIENT & SECRETS INITIALIZATION (OPENROUTER) ---
 try:
     OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 except KeyError as e:
@@ -29,7 +29,7 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
-# OpenRouter routing via standard OpenAI SDK client
+# Hard 25s timeout with zero internal SDK retries so Python manages the loop
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
@@ -37,8 +37,7 @@ client = OpenAI(
     max_retries=0,
 )
 
-# Recommended: Llama 3.3 70B Instruct (fast, high adherence, ~$0.0002/turn)
-# Alternative if you prefer OpenAI: "openai/gpt-4o-mini"
+# High-speed, high-adherence production model (~$0.00025 per interaction)
 MODEL_ID = "meta-llama/llama-3.3-70b-instruct"
 
 # --- SESSION STATE INITIALIZATION ---
@@ -100,13 +99,21 @@ def run_llm_turn(user_input: str):
         blank_state = st.session_state.state_badge["Blank"]
         measured_state = st.session_state.state_badge["Measured"]
 
-        if st.session_state.last_reading_over_range:
+        # Precedence Rule 1: Bench completely unpowered/cold
+        if power_state.startswith("OFF"):
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
+                "the instrument is off, and reminds analyst to power on and review TM-0428 Section 4 before asking for review.]"
+            )
+        # Precedence Rule 2: Active reading on display is over-range (2.842 AU)
+        elif st.session_state.last_reading_over_range and measured_state == "YES":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. "
                 "The supervisor physically walks into the lab suite, looks at the display, and reminds the "
                 "analyst of TM-0428 Section 5.3: re-preparation at an adjusted dilution is explicitly permitted "
                 "on the spot and does NOT require raising an unplanned deviation.]"
             )
+        # Precedence Rule 3: Measured without blanking (Unreferenced baseline)
         elif measured_state == "YES" and blank_state == "NONE":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst measured sample without blanking (Blank: NONE). "
@@ -116,29 +123,27 @@ def run_llm_turn(user_input: str):
                 "under TM-0428 §5.1. Logs in-process non-conformance DEV-QC-UNBLANKED for the aborted run and tells "
                 "them to void the prep and re-initialize the bench clean.]"
             )
-        elif measured_state == "NO" and (blank_state == "WATER" or not power_state.startswith("READY")):
+        # Precedence Rule 4: Early setup error caught BEFORE scanning sample
+        elif measured_state == "NO" and (blank_state == "WATER" or "WARMING" in power_state):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks about an early setup error (cold lamp or water blank) "
                 "before measuring the mAb sample. Supervisor notes no sample was scanned, so no lot release data exists. "
                 "Confirms no deviation is needed: document a contemporaneous note in the raw log, wait for full 20-min "
                 "stabilization, re-zero with Formulation Buffer, and proceed.]"
             )
+        # Precedence Rule 5: Active measurements are in-range (~0.78 AU)
         elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for a review of completed measurements. "
                 "Supervisor inspects the bench, notes duplicate readings (~0.78 AU) are well within the "
                 "validated 0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 6.4.]"
             )
+        # Precedence Rule 6: Bench ready and blanked, mid-assay check before measuring
         elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for a mid-assay sanity check. "
                 "Supervisor confirms lamp is stabilized and buffer blank is stored. Confirms setup looks good "
                 "and instructs them to proceed with measuring sample duplicates.]"
-            )
-        elif power_state.startswith("OFF"):
-            actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
-                "the instrument is off, and reminds analyst to power on and review TM-0428 Section 4 before asking for review.]"
             )
         else:
             actual_api_prompt = (
@@ -146,7 +151,7 @@ def run_llm_turn(user_input: str):
                 "Provides brief, realistic procedural feedback based on active bench state without doing the work.]"
             )
 
-    # Sliding window: keep only the most recent 6 messages to stay well under the 8K TPM ceiling
+    # Sliding window: keep only the most recent 6 messages to protect token budget
     active_history = (
         st.session_state.api_messages[-6:]
         if len(st.session_state.api_messages) > 6
@@ -370,10 +375,11 @@ if is_terminal:
         st.rerun()
 else:
     power_state = st.session_state.state_badge["Power"].upper()
+    measured_state = st.session_state.state_badge["Measured"].upper()
     is_cold = "OFF" in power_state
     is_warming = "WARMING" in power_state
 
-    # If warming: 3 top, 2 bottom (includes neutral "Wait" button)
+    # Warming Layout (3 top, 2 bottom)
     if is_warming:
         r1_c1, r1_c2, r1_c3 = st.columns(3)
         r2_c1, r2_c2 = st.columns(2)
@@ -389,13 +395,17 @@ else:
                 active_command = "Blank with Formulation Buffer"
 
         with r2_c1:
-            if st.button("📊 Measure Samples", use_container_width=True):
-                active_command = "Measure sample preparations"
+            if measured_state == "YES":
+                if st.button("🧮 Calculate Results", use_container_width=True):
+                    active_command = "Calculate concentration per TM-0428"
+            else:
+                if st.button("📊 Measure Samples", use_container_width=True):
+                    active_command = "Measure sample preparations"
         with r2_c2:
             if st.button("📞 Call Supervisor", use_container_width=True):
                 active_command = "Call Supervisor"
 
-    # If cold or >= 20 min ready: clean 2x2 grid (Wait button vanishes)
+    # Stabilized (>= 20 min) or Cold Layout (Clean 2x2 grid)
     else:
         r1_c1, r1_c2 = st.columns(2)
         r2_c1, r2_c2 = st.columns(2)
@@ -413,14 +423,19 @@ else:
                 active_command = "Blank with Formulation Buffer"
 
         with r2_c1:
-            if st.button("📊 Measure Samples", use_container_width=True):
-                active_command = "Measure sample preparations"
+            if measured_state == "YES":
+                if st.button("🧮 Calculate Results", use_container_width=True):
+                    active_command = "Calculate concentration per TM-0428"
+            else:
+                if st.button("📊 Measure Samples", use_container_width=True):
+                    active_command = "Measure sample preparations"
         with r2_c2:
             if st.button("📞 Call Supervisor", use_container_width=True):
                 active_command = "Call Supervisor"
 
 user_text = st.chat_input(
-    "Enter command or calculation data (e.g., 'Prepare sample', 'Calculate', or custom actions)..."
+    "Enter command or calculation data (e.g., 'Prepare sample', 'Calculate', or custom actions)...",
+    disabled=is_terminal,
 )
 if user_text:
     active_command = user_text
