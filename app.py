@@ -207,7 +207,7 @@ def run_llm_turn(user_input: str):
                     "Standby a moment and retry."
                 )
             break
-except (APIError, Exception) as e:
+        except (APIError, Exception) as e:
             print(f"[API ERROR] Unhandled Exception: {type(e).__name__} - {e}")
             error_fallback = (
                 f"⚠️ **[WORKSTATION COMMUNICATION FAULT]**\n\n"
