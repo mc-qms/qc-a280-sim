@@ -29,7 +29,6 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
-# HARD TIMEOUT: 25.0s cap with 0 SDK internal retries so Python controls the loop
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
@@ -88,11 +87,10 @@ def clean_state_token(text: str) -> str:
 
 
 def run_llm_turn(user_input: str):
-    """Executes turn with strict 25s timeout, visual spinner, and audit fallback."""
+    """Executes turn with strict 25s timeout, window pruning, and explicit max_tokens."""
     is_supervisor = "supervisor" in user_input.lower()
     actual_api_prompt = user_input
 
-    # Target director cue
     if is_supervisor:
         if st.session_state.last_reading_over_range:
             actual_api_prompt = (
@@ -106,27 +104,35 @@ def run_llm_turn(user_input: str):
                 "the spectrophotometer and review Section 3 before requesting supervisor review.]"
             )
 
+    # Sliding window: keep only the most recent 6 messages to stay well under the 8K TPM ceiling
+    active_history = (
+        st.session_state.api_messages[-6:]
+        if len(st.session_state.api_messages) > 6
+        else st.session_state.api_messages
+    )
+
     payload = (
         [{"role": "system", "content": SYSTEM_SPEC}]
-        + st.session_state.api_messages
+        + active_history
         + [{"role": "user", "content": actual_api_prompt}]
     )
 
     raw_response = None
     error_fallback = None
 
-    # Maximum 2 attempts (1 immediate, 1 retry on timeout/rate limit)
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
                 model=MODEL_ID,
                 messages=payload,
                 temperature=0.0,
+                max_tokens=600,  # Caps reservation budget to avoid HTTP 413
                 stream=False,
             )
             raw_response = response.choices[0].message.content
             break
-        except (APITimeoutError, APIConnectionError):
+        except (APITimeoutError, APIConnectionError) as e:
+            print(f"[TIMEOUT ERROR] Attempt {attempt}: {e}")
             if attempt == 0:
                 time.sleep(1.0)
                 continue
@@ -136,24 +142,25 @@ def run_llm_turn(user_input: str):
                 "Data integrity lock active. **Please re-try your action.**"
             )
             break
-        except RateLimitError:
+        except RateLimitError as e:
+            print(f"[RATE LIMIT ERROR] Attempt {attempt}: {e}")
             if attempt == 0:
                 time.sleep(1.5)
                 continue
             error_fallback = (
                 "⚠️ **[INSTRUMENT BUS CONGESTION]**\n\n"
                 "LIMS audit logging buffer is temporarily saturated. "
-                "Standby 3 seconds and retry."
+                "Standby a moment and retry."
             )
             break
         except (APIError, Exception) as e:
+            print(f"[API ERROR] Unhandled Exception: {type(e).__name__} - {e}")
             error_fallback = (
-                f"⚠️ **[WORKSTATION COMMUNICATION FAULT]**\n\n"
+                "⚠️ **[WORKSTATION COMMUNICATION FAULT]**\n\n"
                 "An unexpected bus error occurred. Please re-enter your command."
             )
             break
 
-    # Commit successful turn
     if raw_response:
         update_state_from_text(raw_response)
         state_token = extract_state_token(raw_response)
@@ -240,7 +247,6 @@ with st.sidebar:
 st.title("Biopharma QC Analytical Terminal")
 st.caption("Simulated Release Testing Platform | UV-Vis Spectrophotometer Workstation 4")
 
-# Load Initial Opener
 if len(st.session_state.display_messages) == 0:
     opener = (
         "**[QC SUITE 2 — WORKSTATION 4]**\n\n"
@@ -261,7 +267,6 @@ if len(st.session_state.display_messages) == 0:
         {"role": "assistant", "content": f"{initial_state}\n\n{opener}"}
     )
 
-# Display Chat History with Collapsible State Inspection
 for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -298,7 +303,6 @@ user_text = st.chat_input(
 if user_text:
     active_command = user_text
 
-# Execute turn with visual spinner feedback
 if active_command:
     with st.spinner("Processing workstation operation..."):
         run_llm_turn(active_command)
