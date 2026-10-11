@@ -73,17 +73,7 @@ def extract_state_token(raw_text: str) -> str:
 
 
 def update_state_from_text(raw_text: str):
-    """Parses STATE token and updates UI telemetry dictionary."""
-    match = re.search(r"\*{0,2}STATE:\s*\[(.*?)\]\*{0,2}", raw_text, re.IGNORECASE)
-    if match:
-        raw_state = match.group(1)
-        for item in raw_state.split("|"):
-            parts = item.strip().split(":")
-            if len(parts) == 2:
-                key, val = parts[0].strip(), parts[1].strip()
-                if key in st.session_state.state_badge:
-                    st.session_state.state_badge[key] = val
-
+    """Monitors raw text for optical flags without clobbering Python's state machine."""
     if "2.842" in raw_text or "2.855" in raw_text:
         st.session_state.last_reading_over_range = True
     elif "0.781" in raw_text or "0.706" in raw_text or "0.966" in raw_text or "0.856" in raw_text:
@@ -97,7 +87,7 @@ def clean_state_token(text: str) -> str:
 
 
 def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
-    """Executes turn with dynamic persona routing, deterministic physics, and direct Python emission."""
+    """Executes turn with dynamic persona routing, deterministic physics, and direct Python disposition."""
     actual_api_prompt = user_input
     u_lower = user_input.lower().strip()
 
@@ -133,6 +123,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         except ValueError:
             st.session_state.state_badge["SupCalls"] = "1"
 
+        # Hierarchy 1: Bench unpowered/cold
         if power_state.startswith("OFF"):
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -141,7 +132,8 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "stabilize per TM-0428 Section 4, and review the method before calling me.' "
                 "The supervisor turns and heads back to the office.]"
             )
-        elif measured_state == "YES" and blank_state != "BUFFER" and st.session_state.last_reading_over_range:
+        # Hierarchy 2: COMPOUND FAILURE (Fatal First: Invalid Blank + Neat Sample)
+        elif measured_state == "YES" and blank_state != "BUFFER" and (st.session_state.last_reading_over_range or prep_state == "NEAT"):
             blank_desc = (
                 "complete omission of a baseline zero (§5.1)"
                 if blank_state == "NONE"
@@ -149,14 +141,14 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             )
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
-                f"Analyst committed a compound procedural failure. Supervisor inspects the printout on the PC screen "
-                f"and leads FATAL-FIRST: First, calls out the {blank_desc}, which completely invalidates the optical baseline. "
-                "Second, calls out the undiluted sample preparation (§5.2) that saturated the detector at 2.84 AU. "
-                "Firmly clarifies that Section 5.3 re-preparation only protects compliant dilutions that overshoot, NOT runs "
-                "where foundational method prerequisites were skipped. Since raw GMP data was acquired under non-compliant "
-                "conditions, the run must be aborted. Logs in-process non-conformance DEV-QC-SETUP-FAIL for the aborted run, "
-                "tells analyst to reset the bench and start clean, and exits the bay back to the office.]"
+                "COMPOUND FAILURE ROUTE — EXACTLY 4 TO 5 SENTENCES: "
+                "Sentence 1 (Observation): Note that raw data on the PC screen shows duplicate readings saturated at 2.84 AU with an invalid baseline. "
+                f"Sentence 2 (Fatal Error): Call out FATAL-FIRST that the {blank_desc} completely invalidates the baseline before any sample can be acquired. "
+                "Sentence 3 (Secondary Error): Call out the undiluted neat sample preparation (§5.2) and firmly clarify that Section 5.3 re-preparation only protects compliant dilutions that overshoot, NOT runs where foundational baseline steps were skipped. "
+                "Sentence 4 (Directive): Since raw GMP data was acquired under invalid conditions, the run is voided; log in-process non-conformance DEV-QC-SETUP-FAIL, instruct them to scrap all tubes and clean the cuvette, and restart from scratch. "
+                "Sentence 5 (Departure): Exit the bay immediately back to the office.]"
             )
+        # Hierarchy 3: Over-Range ONLY (Properly Blanked with Formulation Buffer, §5.3 Concession Valid)
         elif st.session_state.last_reading_over_range and measured_state == "YES" and blank_state == "BUFFER":
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -165,6 +157,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "re-preparation at an adjusted dilution is explicitly permitted on the spot and does NOT require raising an unplanned deviation. "
                 "Advises them to re-prep and re-run, then exits the bay.]"
             )
+        # Hierarchy 4: Invalid Blank ONLY (Diluted sample, but Blank is NONE or WATER)
         elif measured_state == "YES" and blank_state in ["NONE", "WATER"]:
             blank_desc = "without blanking (Blank: NONE)" if blank_state == "NONE" else "with Milli-Q Water instead of Formulation Buffer"
             actual_api_prompt = (
@@ -174,6 +167,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "and signing off, logs in-process non-conformance DEV-QC-SETUP-FAIL for the aborted run, tells them to scrap prep "
                 "and re-initialize bench clean, and exits the bay.]"
             )
+        # Hierarchy 5: Pre-measurement Water Blank caught BEFORE scanning sample
         elif measured_state == "NO" and blank_state == "WATER":
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -182,32 +176,33 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "no deviation is required. Instructs analyst to document a contemporaneous note in the raw log, re-zero with "
                 "Formulation Buffer once the lamp is ready, and proceed. The supervisor exits the bay.]"
             )
+        # Hierarchy 6: Routine Warmup
         elif "WARMING" in power_state and measured_state == "NO":
             if prep_state == "DILUTED_BUFFER" and blank_state == "BUFFER":
                 actual_api_prompt = (
                     f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
-                    "Supervisor walks into the bay and inspects the workstation. Sees duplicate sample preps in the rack "
-                    "and a Formulation Buffer baseline stored, but the PC monitor shows the lamps are still warming up. "
-                    "With mild exasperation at an unnecessary page, the supervisor states that the bench setup is completely fine, "
-                    "but the lamps physically need 20 minutes to thermally stabilize. Tells them not to page the desk just to watch "
-                    "a timer tick, and heads back to the office.]"
+                    "ROUTINE WARMUP ROUTE — STRICT 2 TO 3 SENTENCES TOTAL: "
+                    "Sentence 1 (Observation): Point out the PC monitor shows the lamps are still warming up even though preps and buffer blank are ready. "
+                    "Sentence 2 (Directive): Tell the analyst directly with mild exasperation that the setup is fine, but the optical bench physically needs 20 minutes to stabilize—stop paging the lead desk just to watch a timer tick. "
+                    "Sentence 3 (Departure): Turn and exit the bay back to the office.]"
                 )
             elif prep_state != "NONE" or blank_state != "NONE":
                 actual_api_prompt = (
                     f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
-                    "Supervisor walks into the bay, glances at the PC workstation monitor showing LAMP WARMING, and notes the "
-                    "bench activity already underway. Reminds the analyst that regardless of preparations in progress, the "
-                    "spectrophotometer cannot scan reliably until the 20-minute lamp stabilization cycle finishes. "
-                    "Advises them to finish their setup and wait for the hardware to stabilize before paging again, then exits the bay.]"
+                    "ROUTINE WARMUP ROUTE — STRICT 2 TO 3 SENTENCES TOTAL: "
+                    "Sentence 1 (Observation): Note the lamps are still warming on the monitor while preparations are underway. "
+                    "Sentence 2 (Directive): Remind them the instrument cannot scan until the 20-minute lamp stabilization cycle finishes; tell them to finish bench prep and wait without paging the desk. "
+                    "Sentence 3 (Departure): Turn and exit the bay back to the office.]"
                 )
             else:
                 actual_api_prompt = (
                     f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
-                    "Supervisor walks into the bay and glances at the PC workstation monitor showing LAMP WARMING. "
-                    "The supervisor speaks candidly: 'The lamps are still stabilizing on the data station. You haven't blanked or "
-                    "prepped anything yet. Don't page me just to watch a timer tick—use this time to read TM-0428 or get your pipettes "
-                    "and tubes organized.' The supervisor turns and heads back to the office.]"
+                    "IDLE WARMUP ROUTE — STRICT 2 TO 3 SENTENCES TOTAL: "
+                    "Sentence 1 (Observation): Note the monitor shows LAMP WARMING and the bench is completely idle. "
+                    "Sentence 2 (Directive): Tell them candidly not to page the lead desk just to watch a timer—use this time to read TM-0428 or set up pipettes and tubes. "
+                    "Sentence 3 (Departure): Turn and exit the bay back to the office.]"
                 )
+        # Hierarchy 7: Completed in-range measurements (~0.78 AU)
         elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -215,6 +210,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "(~0.78 AU) are well within the 0.200–1.200 AU linear range, tells them to proceed to calculations per Section 6.4, "
                 "and exits the bay.]"
             )
+        # Hierarchy 8: Mid-assay sanity check (ready + buffer blank + measured NO)
         elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -232,6 +228,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     # 2. INSTRUMENT POWER ROUTING (NARRATOR SPEC ACTIVE)
     # =========================================================================
     elif any(k in u_lower for k in ["power on", "switch on", "turn on"]):
+        st.session_state.state_badge["Power"] = "WARMING (2 min)"
         actual_api_prompt = (
             f"{user_input} [DIRECTOR NOTE: Analyst flips the rocker switch on the spectrophotometer chassis. "
             "Describe the physical hardware response: cooling fan engages with a quiet whir, internal stepper motors "
@@ -276,6 +273,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         else:
             st.session_state.cuvette_contents = reagent
             chosen_blank_token = "BUFFER" if "buffer" in u_lower else "WATER"
+            st.session_state.state_badge["Blank"] = chosen_blank_token
             actual_api_prompt = (
                 f"{user_input} [DIRECTOR NOTE: "
                 f"{rinse_narrative}"
@@ -287,104 +285,6 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "CRITICAL: Report ONLY physical pipetting/zeroing action and PC software confirmation. Stop immediately.]"
             )
 
-    # =========================================================================
-    # 4. SAMPLE PREPARATION ROUTING (NARRATOR SPEC ACTIVE)
-    # =========================================================================
-    elif any(k in u_lower for k in ["prepare", "prep", "dilute"]) and "blank" not in u_lower:
-        is_neat = any(k in u_lower for k in ["neat", "undiluted", "direct"])
-        has_buffer = any(k in u_lower for k in ["buffer", "formulation"])
-        has_water = any(k in u_lower for k in ["water", "milli-q"])
-
-        is_serial_100 = "serial" in u_lower and "100" in u_lower and "900" in u_lower
-        is_direct_100 = any(k in u_lower for k in [
-            "1:100", "1/100", "1 to 100", "100-fold", "100x",
-            "100 df", "df 100", "df of 100", "dilution factor of 100", "dilution factor 100"
-        ])
-
-        if is_neat:
-            actual_api_prompt = (
-                f"{user_input} [DIRECTOR NOTE: The analyst pipettes neat, undiluted mAb Drug Substance directly into "
-                "duplicate microcentrifuge tubes. Confirm duplicate neat preparations (Prep A and Prep B). "
-                "Update STATE to Prep: NEAT and Measured: NO. Stop immediately without advice.]"
-            )
-        elif (is_serial_100 or is_direct_100) and (has_buffer or not has_water):
-            math_explanation = (
-                "a two-step 1:10 serial dilution (100 µL into 900 µL Formulation Buffer, followed by 100 µL into 900 µL Formulation Buffer), "
-                "yielding a validated final dilution factor of 1:100 (DF = 100)"
-                if is_serial_100
-                else "a 1:100 dilution using Formulation Buffer as the diluent (DF = 100)"
-            )
-            actual_api_prompt = (
-                f"{user_input} [DIRECTOR NOTE: The analyst executes duplicate sample preparations using {math_explanation}. "
-                "CRITICAL ARITHMETIC ENFORCEMENT: Confirm duplicate preparations (Prep A and Prep B) at 1:100 dilution factor. "
-                "DO NOT calculate or state 1:1000. Describe pipetting with calibrated pipettors and vortexing tubes. "
-                "Update STATE to Prep: DILUTED_BUFFER and Measured: NO. Stop immediately without advice.]"
-            )
-        elif (is_serial_100 or is_direct_100) and has_water:
-            actual_api_prompt = (
-                f"{user_input} [DIRECTOR NOTE: The analyst prepares duplicate samples using a 1:100 dilution factor in Milli-Q Water. "
-                "Confirm duplicate preparations (Prep A and Prep B) at 1:100 in water. "
-                "Update STATE to Prep: DILUTED_WATER and Measured: NO. Stop immediately without advice.]"
-            )
-        else:
-            actual_api_prompt = user_input
-
-    # =========================================================================
-    # 5. INSTRUMENT MEASUREMENT ROUTING (NARRATOR SPEC ACTIVE)
-    # =========================================================================
-    elif any(k in u_lower for k in ["measure", "scan"]) and "blank" not in u_lower:
-        if "OFF" in power_state:
-            actual_api_prompt = (
-                f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: Instrument is POWER OFF. "
-                "State that the power switch is OFF and the PC software shows 'Hardware: Offline'. Refuse measurement.]"
-            )
-        elif prep_state == "NONE":
-            actual_api_prompt = (
-                f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: Empty sample cell. "
-                "Describe inspecting the cell compartment: no sample preparation has been pipetted into the cuvette. "
-                "The software remains idle. Refuse scan. Stop immediately after reporting cuvette state.]"
-            )
-        else:
-            is_measurement_turn = True
-            is_cold = "WARMING" in power_state
-            jitter = 0.045 if is_cold else 0.000
-
-            if prep_state == "NEAT":
-                rep1_280, rep1_320 = 2.842, 0.084
-                rep2_280, rep2_320 = round(2.855 + jitter, 3), 0.081
-                st.session_state.last_reading_over_range = True
-            elif prep_state == "DILUTED_WATER":
-                base_offset = -0.075 if blank_state == "BUFFER" else 0.000
-                rep1_280, rep1_320 = round(0.781 + base_offset, 3), 0.006
-                rep2_280, rep2_320 = round(0.778 + base_offset + jitter, 3), 0.005
-                st.session_state.last_reading_over_range = False
-            else:
-                base_offset = 0.185 if blank_state == "NONE" else (0.075 if blank_state == "WATER" else 0.000)
-                rep1_280, rep1_320 = round(0.781 + base_offset, 3), 0.006
-                rep2_280, rep2_320 = round(0.778 + base_offset + jitter, 3), 0.005
-                st.session_state.last_reading_over_range = False
-
-            st.session_state.last_readings = {
-                "rep1_280": rep1_280,
-                "rep1_320": rep1_320,
-                "rep2_280": rep2_280,
-                "rep2_320": rep2_320,
-            }
-
-            blank_header = ""
-            if blank_state == "BUFFER":
-                blank_header = "[Baseline Zero Stored: Formulation Buffer | A280 = 0.000 AU | A320 = 0.000 AU]\n"
-            elif blank_state == "WATER":
-                blank_header = "[Baseline Zero Stored: Milli-Q Water | A280 = 0.000 AU | A320 = 0.000 AU]\n"
-
-            trace_block = (
-                f"{blank_header}"
-                f"Prep A (Rep 1): A280 = {rep1_280:.3f} AU | A320 = {rep1_320:.3f} AU\n"
-                f"Prep B (Rep 2): A280 = {rep2_280:.3f} AU | A320 = {rep2_320:.3f} AU"
-            )
-            active_trace_block = trace_block
-
-            cuvette_wash_narrative = ""
     # =========================================================================
     # 4. INSTRUMENT MEASUREMENT ROUTING (NOW ABOVE PREP)
     # =========================================================================
@@ -449,7 +349,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 )
 
             st.session_state.cuvette_contents = "mAb Sample Preparation"
-            st.session_state.state_badge["Measured"] = "YES"  # Direct state update in Python
+            st.session_state.state_badge["Measured"] = "YES"
 
             actual_api_prompt = (
                 f"Measure sample preparations [DIRECTOR NOTE: {cuvette_wash_narrative}"
@@ -473,12 +373,18 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         ])
 
         if is_neat:
+            st.session_state.state_badge["Prep"] = "NEAT"
+            st.session_state.state_badge["Measured"] = "NO"
+            st.session_state.last_reading_over_range = True
             actual_api_prompt = (
                 f"{user_input} [DIRECTOR NOTE: The analyst pipettes neat, undiluted mAb Drug Substance directly into "
                 "duplicate microcentrifuge tubes. Confirm duplicate neat preparations (Prep A and Prep B). "
                 "Update STATE to Prep: NEAT and Measured: NO. Stop immediately without advice.]"
             )
         elif (is_serial_100 or is_direct_100) and (has_buffer or not has_water):
+            st.session_state.state_badge["Prep"] = "DILUTED_BUFFER"
+            st.session_state.state_badge["Measured"] = "NO"
+            st.session_state.last_reading_over_range = False
             math_explanation = (
                 "a two-step 1:10 serial dilution (100 µL into 900 µL Formulation Buffer, followed by 100 µL into 900 µL Formulation Buffer), "
                 "yielding a validated final dilution factor of 1:100 (DF = 100)"
@@ -492,6 +398,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "Update STATE to Prep: DILUTED_BUFFER and Measured: NO. Stop immediately without advice.]"
             )
         elif (is_serial_100 or is_direct_100) and has_water:
+            st.session_state.state_badge["Prep"] = "DILUTED_WATER"
+            st.session_state.state_badge["Measured"] = "NO"
+            st.session_state.last_reading_over_range = False
             actual_api_prompt = (
                 f"{user_input} [DIRECTOR NOTE: The analyst prepares duplicate samples using a 1:100 dilution factor in Milli-Q Water. "
                 "Confirm duplicate preparations (Prep A and Prep B) at 1:100 in water. "
@@ -499,6 +408,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             )
         else:
             actual_api_prompt = user_input
+
     # =========================================================================
     # 6. CALCULATION & DISPOSITION ROUTING (DIRECT PYTHON EMISSION)
     # =========================================================================
@@ -708,6 +618,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             break
 
     if raw_response:
+        # State Protection: Only physical bench turns monitor optical flags
         if not is_supervisor:
             update_state_from_text(raw_response)
 
@@ -734,9 +645,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         st.session_state.display_messages.append(
             {"role": "assistant", "content": error_fallback, "state": ""}
         )
-
-
-# --- SIDEBAR: TELEMETRY & DOCUMENT DECK ---
+        # --- SIDEBAR: TELEMETRY & DOCUMENT DECK ---
 with st.sidebar:
     st.header("🔬 Workstation Telemetry")
 
@@ -926,7 +835,7 @@ else:
                     active_command = "Calculate concentration per TM-0428"
             else:
                 if st.button("📊 Measure Samples", use_container_width=True):
-                    active_command = "Measure sample preparations"
+                    active_command = "Measure samples"
         with r2_c2:
             if st.button("📞 Call Supervisor", use_container_width=True):
                 active_command = "Call Supervisor"
