@@ -29,6 +29,7 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
+# HARD TIMEOUT: 25.0s cap with 0 SDK internal retries so Python controls the loop
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
@@ -91,17 +92,40 @@ def run_llm_turn(user_input: str):
     is_supervisor = "supervisor" in user_input.lower()
     actual_api_prompt = user_input
 
+    # Dynamic Director Notes tailored to exact bench state
     if is_supervisor:
+        power_state = st.session_state.state_badge["Power"]
+        blank_state = st.session_state.state_badge["Blank"]
+        measured_state = st.session_state.state_badge["Measured"]
+
         if st.session_state.last_reading_over_range:
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. "
-                "Coach the analyst directly on TM-0428 Section 4.3: re-preparation at an adjusted dilution "
-                "is permitted and is NOT an unplanned deviation.]"
+                "The supervisor physically walks into the lab suite, looks at the display, and reminds the "
+                "analyst of TM-0428 Section 4.3: re-preparation at an adjusted dilution is explicitly permitted "
+                "on the spot and does NOT require raising an unplanned deviation.]"
             )
-        elif st.session_state.state_badge["Power"].startswith("OFF"):
+        elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Direct analyst to power on "
-                "the spectrophotometer and review Section 3 before requesting supervisor review.]"
+                "Call Supervisor [DIRECTOR NOTE: Analyst asks for a review of completed measurements. "
+                "Supervisor inspects the bench, notes duplicate readings (~0.78 AU) are well within the "
+                "validated 0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 5.4.]"
+            )
+        elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Analyst asks for a mid-assay sanity check. "
+                "Supervisor confirms lamp is stabilized and buffer blank is stored. Confirms setup looks good "
+                "and instructs them to proceed with measuring sample duplicates.]"
+            )
+        elif power_state.startswith("OFF"):
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
+                "the instrument is off, and reminds analyst to power on and review TM-0428 before asking for review.]"
+            )
+        else:
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Supervisor walks into the bay to check progress. "
+                "Provides brief, realistic procedural feedback based on active bench state without doing the work.]"
             )
 
     # Sliding window: keep only the most recent 6 messages to stay well under the 8K TPM ceiling
@@ -147,11 +171,18 @@ def run_llm_turn(user_input: str):
             if attempt == 0:
                 time.sleep(1.5)
                 continue
-            error_fallback = (
-                "⚠️ **[INSTRUMENT BUS CONGESTION]**\n\n"
-                "LIMS audit logging buffer is temporarily saturated. "
-                "Standby a moment and retry."
-            )
+            if is_supervisor:
+                error_fallback = (
+                    "⚠️ **[SUPERVISOR UNAVAILABLE]**\n\n"
+                    "The supervisor is currently on the floor with QA and didn't pick up the page. "
+                    "Please wait a moment and try calling again."
+                )
+            else:
+                error_fallback = (
+                    "⚠️ **[INSTRUMENT BUS CONGESTION]**\n\n"
+                    "LIMS audit logging buffer is temporarily saturated. "
+                    "Standby a moment and retry."
+                )
             break
         except (APIError, Exception) as e:
             print(f"[API ERROR] Unhandled Exception: {type(e).__name__} - {e}")
@@ -247,6 +278,7 @@ with st.sidebar:
 st.title("Biopharma QC Analytical Terminal")
 st.caption("Simulated Release Testing Platform | UV-Vis Spectrophotometer Workstation 4")
 
+# Load Initial Opener
 if len(st.session_state.display_messages) == 0:
     opener = (
         "**[QC SUITE 2 — WORKSTATION 4]**\n\n"
@@ -267,6 +299,7 @@ if len(st.session_state.display_messages) == 0:
         {"role": "assistant", "content": f"{initial_state}\n\n{opener}"}
     )
 
+# Display Chat History with Collapsible State Inspection
 for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -274,7 +307,7 @@ for msg in st.session_state.display_messages:
             with st.expander("📟 Audit Trail Telemetry", expanded=False):
                 st.code(msg["state"], language="text")
 
-# Quick-Action Button Grid
+# Responsive Action Layout (3 top, 2 bottom)
 st.markdown("##### Standard Analytical Operations")
 r1_c1, r1_c2, r1_c3 = st.columns(3)
 r2_c1, r2_c2 = st.columns(2)
