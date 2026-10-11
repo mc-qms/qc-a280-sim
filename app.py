@@ -64,6 +64,8 @@ if "selecting_blank" not in st.session_state:
     st.session_state.selecting_blank = False
 if "cuvette_contents" not in st.session_state:
     st.session_state.cuvette_contents = "EMPTY"
+if "awaiting_prep" not in st.session_state:
+    st.session_state.awaiting_prep = False
 
 
 def extract_state_token(raw_text: str) -> str:
@@ -112,6 +114,22 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         f"In-Range: {st.session_state.state_badge['In-Range']} | "
         f"SupCalls: {st.session_state.state_badge['SupCalls']}]"
     )
+
+    # =========================================================================
+    # PENDING-INTENT HANDLER: SAMPLE PREPARATION SLOT FILLING
+    # =========================================================================
+    is_global_escape = any(k in u_lower for k in [
+        "supervisor", "lead", "power", "blank", "wait", "method", "page", "reset", "calc"
+    ])
+    if st.session_state.awaiting_prep:
+        if is_global_escape:
+            st.session_state.awaiting_prep = False
+            is_prep_submission = False
+        else:
+            st.session_state.awaiting_prep = False
+            is_prep_submission = True
+    else:
+        is_prep_submission = False
 
     # =========================================================================
     # 1. SUPERVISOR ROUTING (SUPERVISOR SPEC ACTIVE)
@@ -361,7 +379,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     # =========================================================================
     # 5. SAMPLE PREPARATION ROUTING (NOW BELOW MEASUREMENT)
     # =========================================================================
-    elif any(k in u_lower for k in ["prepare", "prep", "dilute"]) and not any(k in u_lower for k in ["measure", "scan", "blank"]):
+    elif (is_prep_submission or any(k in u_lower for k in ["prepare", "prep", "dilute"])) and not any(k in u_lower for k in ["measure", "scan", "blank"]):
         is_neat = any(k in u_lower for k in ["neat", "undiluted", "direct"])
         has_buffer = any(k in u_lower for k in ["buffer", "formulation"])
         has_water = any(k in u_lower for k in ["water", "milli-q"])
@@ -407,6 +425,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "Update STATE to Prep: DILUTED_WATER and Measured: NO. Stop immediately without advice.]"
             )
         else:
+            st.session_state.awaiting_prep = True
             actual_api_prompt = user_input
 
     # =========================================================================
@@ -645,7 +664,8 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         st.session_state.display_messages.append(
             {"role": "assistant", "content": error_fallback, "state": ""}
         )
-        # --- SIDEBAR: TELEMETRY & DOCUMENT DECK ---
+
+# --- SIDEBAR: TELEMETRY & DOCUMENT DECK ---
 with st.sidebar:
     st.header("🔬 Workstation Telemetry")
 
@@ -719,6 +739,7 @@ with st.sidebar:
         st.session_state.last_readings = None
         st.session_state.selecting_blank = False
         st.session_state.cuvette_contents = "EMPTY"
+        st.session_state.awaiting_prep = False
         st.rerun()
 
 # --- MAIN TERMINAL WORKSPACE ---
@@ -790,6 +811,7 @@ if is_terminal:
         st.session_state.last_readings = None
         st.session_state.selecting_blank = False
         st.session_state.cuvette_contents = "EMPTY"
+        st.session_state.awaiting_prep = False
         st.rerun()
 
 elif st.session_state.selecting_blank:
@@ -820,6 +842,7 @@ else:
 
         with r1_c1:
             if st.button("🧪 Prepare Sample", use_container_width=True):
+                st.session_state.awaiting_prep = True
                 active_command = "Prepare Sample"
         with r1_c2:
             if st.button("⏳ Wait", use_container_width=True):
@@ -851,6 +874,7 @@ else:
                     active_command = "Power ON the Spectrophotometer"
             else:
                 if st.button("🧪 Prepare Sample", use_container_width=True):
+                    st.session_state.awaiting_prep = True
                     active_command = "Prepare Sample"
 
         with r1_c2:
