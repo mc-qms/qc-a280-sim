@@ -111,6 +111,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     prep_state = st.session_state.state_badge["Prep"].upper()
     measured_state = st.session_state.state_badge["Measured"].upper()
 
+    is_measurement_turn = False
+    active_trace_block = None
+
     current_frozen_state = (
         f"STATE: [Power: {st.session_state.state_badge['Power']} | "
         f"Blank: {st.session_state.state_badge['Blank']} | "
@@ -124,7 +127,6 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     # 1. SUPERVISOR ROUTING (SUPERVISOR SPEC ACTIVE)
     # =========================================================================
     if is_supervisor:
-        # Increment supervisor calls telemetry
         try:
             curr_calls = int(st.session_state.state_badge.get("SupCalls", 0))
             st.session_state.state_badge["SupCalls"] = str(curr_calls + 1)
@@ -343,6 +345,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "The software remains idle. Refuse scan. Stop immediately after reporting cuvette state.]"
             )
         else:
+            is_measurement_turn = True
             is_cold = "WARMING" in power_state
             jitter = 0.045 if is_cold else 0.000
 
@@ -379,6 +382,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 f"Prep A (Rep 1): A280 = {rep1_280:.3f} AU | A320 = {rep1_320:.3f} AU\n"
                 f"Prep B (Rep 2): A280 = {rep2_280:.3f} AU | A320 = {rep2_320:.3f} AU"
             )
+            active_trace_block = trace_block
 
             cuvette_wash_narrative = ""
             if st.session_state.cuvette_contents not in ["EMPTY", "mAb Sample Preparation"]:
@@ -392,9 +396,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
 
             actual_api_prompt = (
                 f"Measure sample preparations [DIRECTOR NOTE: {cuvette_wash_narrative}"
-                f"Transcribe the following raw spectrophotometer data trace verbatim into your response, "
-                f"update STATE to Measured: YES, and do not provide unsolicited advice or recommended next steps:\n"
-                f"```\n{trace_block}\n```]"
+                f"MANDATORY TRANSCRIPTION: Transcribe the following raw spectrophotometer data trace verbatim in a code block into your response. "
+                f"Update STATE to Measured: YES. Do not summarize readings in prose; the analyst needs the numerical trace:\n"
+                f"```text\n{trace_block}\n```]"
             )
 
     # =========================================================================
@@ -606,7 +610,6 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             break
 
     if raw_response:
-        # State Protection: Only physical bench turns update state; supervisor visits cannot mutate telemetry
         if not is_supervisor:
             update_state_from_text(raw_response)
 
@@ -615,6 +618,11 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
 
         if clean_text.lower().startswith(user_input.lower()):
             clean_text = clean_text[len(user_input):].lstrip(":\n -")
+
+        # Deterministic Trace Guarantee: If measurements occurred and the LLM omitted the numbers, append the raw trace block
+        if is_measurement_turn and active_trace_block:
+            if "Prep A (Rep 1):" not in clean_text:
+                clean_text = f"{clean_text}\n\n```text\n{active_trace_block}\n```"
 
         st.session_state.api_messages.append({"role": "user", "content": actual_api_prompt})
         st.session_state.api_messages.append({"role": "assistant", "content": raw_response})
@@ -861,7 +869,7 @@ user_text = st.chat_input(
 )
 if user_text:
     active_command = user_text
-    st.session_state.selecting_blank = False  # FM-4 Fix: Clear sticky blank selection modal on text input
+    st.session_state.selecting_blank = False
 
 if active_command:
     with st.spinner("Processing workstation operation..."):
