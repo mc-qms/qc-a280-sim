@@ -104,25 +104,39 @@ def run_llm_turn(user_input: str):
     # 1. SUPERVISOR INTERACTION ROUTING
     # =========================================================================
     if any(k in u_lower for k in ["supervisor", "ask lead", "elevate"]):
+        # Hierarchy 1: Bench completely unpowered/cold
         if power_state.startswith("OFF"):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
                 "the instrument is off, and reminds analyst to power on and review TM-0428 Section 4 before asking for review.]"
             )
-        elif st.session_state.last_reading_over_range and measured_state == "YES":
+        # Hierarchy 2: COMPOUND FAILURE (Neat AND Invalid Blank [NONE or WATER])
+        elif measured_state == "YES" and blank_state != "BUFFER" and st.session_state.last_reading_over_range:
+            blank_desc = "missing baseline zero (§5.1)" if blank_state == "NONE" else "Milli-Q Water blank instead of Formulation Buffer (§5.1)"
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. Supervisor walks into the bay, "
-                "looks at the display, and reminds analyst of TM-0428 Section 5.3: re-preparation at an adjusted dilution "
-                "is explicitly permitted on the spot and does NOT require raising an unplanned deviation.]"
+                f"Call Supervisor [DIRECTOR NOTE: Analyst ran neat sample with an invalid baseline ({blank_desc}). "
+                "Supervisor inspects the raw trace and catches BOTH errors: invalid baseline (§5.1) AND undiluted sample (§5.2). "
+                "Firmly clarifies that Section 5.3 re-preparation only protects compliant runs that overshoot, NOT runs where basic method "
+                "prerequisites were skipped. Since raw GMP data was acquired under non-compliant conditions, the run must be aborted. "
+                "Logs in-process non-conformance DEV-QC-SETUP-FAIL for the aborted run, and tells analyst to reset the bench and start clean.]"
             )
-        elif measured_state == "YES" and blank_state == "NONE":
+        # Hierarchy 3: Over-Range ONLY (Properly Blanked with Formulation Buffer, §5.3 Concession Valid)
+        elif st.session_state.last_reading_over_range and measured_state == "YES" and blank_state == "BUFFER":
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Analyst measured sample without blanking (Blank: NONE). "
-                "Supervisor reviews raw scan data, spots complete absence of blank entry, and points out the "
-                "elevated absorbances (~0.96 AU) that will calculate to ~66 mg/mL (exceeding 50-60 target). "
-                "Commends analyst for stopping before calculating, logs in-process non-conformance DEV-QC-UNBLANKED "
+                "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU, but baseline zero with Formulation Buffer was stored properly. "
+                "Supervisor walks into the bay, looks at the display, and reminds analyst of TM-0428 Section 5.3: "
+                "re-preparation at an adjusted dilution is explicitly permitted on the spot and does NOT require raising an unplanned deviation.]"
+            )
+        # Hierarchy 4: Invalid Blank ONLY (Diluted sample, but Blank is NONE or WATER)
+        elif measured_state == "YES" and blank_state in ["NONE", "WATER"]:
+            blank_desc = "without blanking (Blank: NONE)" if blank_state == "NONE" else "with Milli-Q Water instead of Formulation Buffer"
+            actual_api_prompt = (
+                f"Call Supervisor [DIRECTOR NOTE: Analyst measured diluted sample {blank_desc}. "
+                "Supervisor reviews raw scan data, spots the non-compliant baseline, and points out the matrix artifact. "
+                "Commends analyst for stopping before calculating and signing off, logs in-process non-conformance DEV-QC-SETUP-FAIL "
                 "for the aborted run, and tells them to scrap prep and re-initialize bench clean.]"
             )
+        # Hierarchy 5: Early setup error caught BEFORE scanning sample
         elif measured_state == "NO" and (blank_state == "WATER" or "WARMING" in power_state):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks about an early setup error (cold lamp or water blank) "
@@ -130,12 +144,14 @@ def run_llm_turn(user_input: str):
                 "Confirms no deviation is needed: document contemporaneous note in raw log, wait for 20-min stabilization, "
                 "re-zero with Formulation Buffer, and proceed.]"
             )
+        # Hierarchy 6: Completed in-range measurements (~0.78 AU)
         elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for review of completed measurements. "
                 "Supervisor inspects bench, confirms duplicate readings (~0.78 AU) are well within the "
                 "0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 6.4.]"
             )
+        # Hierarchy 7: Bench ready and blanked, mid-assay check before measuring
         elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for a mid-assay sanity check. Supervisor confirms "
@@ -187,11 +203,12 @@ def run_llm_turn(user_input: str):
                 "rep2_320": rep2_320,
             }
 
-            blank_header = (
-                "[Baseline Zero Stored: Formulation Buffer | A280 = 0.000 AU | A320 = 0.000 AU]\n"
-                if blank_state == "BUFFER"
-                else ""
-            )
+            blank_header = ""
+            if blank_state == "BUFFER":
+                blank_header = "[Baseline Zero Stored: Formulation Buffer | A280 = 0.000 AU | A320 = 0.000 AU]\n"
+            elif blank_state == "WATER":
+                blank_header = "[Baseline Zero Stored: Milli-Q Water | A280 = 0.000 AU | A320 = 0.000 AU]\n"
+
             trace_block = (
                 f"{blank_header}"
                 f"Prep A (Rep 1): A280 = {rep1_280:.3f} AU | A320 = {rep1_320:.3f} AU\n"
@@ -546,7 +563,7 @@ for m in reversed(st.session_state.display_messages):
 
 is_terminal = (
     "ANALYTICAL TESTING SUMMARY:" in last_assistant_content
-    or "DEV-QC-UNBLANKED" in last_assistant_content
+    or "DEV-QC-" in last_assistant_content
     or "DATA INTEGRITY FAILURE" in last_assistant_content
 )
 
