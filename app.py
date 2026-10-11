@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from openai import OpenAI, RateLimitError, APIError
+from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError, APIError
 import streamlit as st
 
 # --- PAGE CONFIGURATION ---
@@ -29,9 +29,12 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
+# HARD TIMEOUT: 25.0s cap with 0 SDK internal retries so Python controls the loop
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
+    timeout=25.0,
+    max_retries=0,
 )
 
 MODEL_ID = "openai/gpt-oss-20b"
@@ -54,8 +57,14 @@ if "last_reading_over_range" not in st.session_state:
     st.session_state.last_reading_over_range = False
 
 
+def extract_state_token(raw_text: str) -> str:
+    """Extracts raw STATE line if present."""
+    match = re.search(r"\*{0,2}STATE:\s*\[(.*?)\]\*{0,2}", raw_text, re.IGNORECASE)
+    return match.group(0).strip() if match else ""
+
+
 def update_state_from_text(raw_text: str):
-    """Parses STATE token and updates UI telemetry."""
+    """Parses STATE token and updates UI telemetry dictionary."""
     match = re.search(r"\*{0,2}STATE:\s*\[(.*?)\]\*{0,2}", raw_text, re.IGNORECASE)
     if match:
         raw_state = match.group(1)
@@ -73,36 +82,40 @@ def update_state_from_text(raw_text: str):
 
 
 def clean_state_token(text: str) -> str:
-    """Strips the STATE line from user-facing conversation display."""
+    """Strips the STATE token line from dialogue text."""
     cleaned = re.sub(r"\*{0,2}STATE:\s*\[.*?\]\*{0,2}\n*", "", text, flags=re.IGNORECASE)
     return cleaned.strip()
 
 
-def execute_turn(user_input: str):
-    """Executes turn with automatic backoff retry and grounded error handling."""
-    actual_prompt = user_input
-    is_supervisor_call = "supervisor" in user_input.lower()
+def run_llm_turn(user_input: str):
+    """Executes turn with strict 25s timeout, visual spinner, and audit fallback."""
+    is_supervisor = "supervisor" in user_input.lower()
+    actual_api_prompt = user_input
 
-    if is_supervisor_call:
+    # Target director cue
+    if is_supervisor:
         if st.session_state.last_reading_over_range:
-            actual_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: The bench reading currently displays 2.842 AU. "
-                "The supervisor physically walks into the lab suite, looks at the display, and reminds the "
-                "analyst of TM-0428 Section 4.3: re-preparation at an adjusted dilution is explicitly permitted "
-                "on the spot and does NOT require raising an unplanned deviation.]"
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. "
+                "Coach the analyst directly on TM-0428 Section 4.3: re-preparation at an adjusted dilution "
+                "is permitted and is NOT an unplanned deviation.]"
             )
         elif st.session_state.state_badge["Power"].startswith("OFF"):
-            actual_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: The supervisor walks into the bay, notices the spectrophotometer "
-                "is powered off, and tells the analyst to power on the bench and review TM-0428 before asking for review.]"
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Direct analyst to power on "
+                "the spectrophotometer and review Section 3 before requesting supervisor review.]"
             )
 
-    st.session_state.display_messages.append({"role": "user", "content": user_input})
-    st.session_state.api_messages.append({"role": "user", "content": actual_prompt})
+    payload = (
+        [{"role": "system", "content": SYSTEM_SPEC}]
+        + st.session_state.api_messages
+        + [{"role": "user", "content": actual_api_prompt}]
+    )
 
-    payload = [{"role": "system", "content": SYSTEM_SPEC}] + st.session_state.api_messages
+    raw_response = None
+    error_fallback = None
 
-    raw_text = None
+    # Maximum 2 attempts (1 immediate, 1 retry on timeout/rate limit)
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
@@ -111,39 +124,53 @@ def execute_turn(user_input: str):
                 temperature=0.0,
                 stream=False,
             )
-            raw_text = response.choices[0].message.content
+            raw_response = response.choices[0].message.content
+            break
+        except (APITimeoutError, APIConnectionError):
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            error_fallback = (
+                "⚠️ **[WORKSTATION BUS TIMEOUT]**\n\n"
+                "The spectrophotometer serial interface did not acknowledge the command within 25 seconds. "
+                "Data integrity lock active. **Please re-try your action.**"
+            )
             break
         except RateLimitError:
             if attempt == 0:
                 time.sleep(1.5)
                 continue
-            if is_supervisor_call:
-                error_msg = (
-                    "⚠️ **[SUPERVISOR UNAVAILABLE]**\n\n"
-                    "The supervisor is currently on the floor with QA and didn't pick up the page. "
-                    "Please wait a moment and try calling again."
-                )
-            else:
-                error_msg = (
-                    "⚠️ **[INSTRUMENT DATA BUFFER BUSY]**\n\n"
-                    "The spectrophotometer workstation is synchronizing its audit log. "
-                    "Please wait a moment and retry your action."
-                )
-            st.session_state.display_messages.append({"role": "assistant", "content": error_msg})
-            return
-        except Exception:
-            error_msg = (
-                "⚠️ **[STATION COMMUNICATION TIMEOUT]**\n\n"
-                "Workstation interface signal dropped. Please re-enter your command."
+            error_fallback = (
+                "⚠️ **[INSTRUMENT BUS CONGESTION]**\n\n"
+                "LIMS audit logging buffer is temporarily saturated. "
+                "Standby 3 seconds and retry."
             )
-            st.session_state.display_messages.append({"role": "assistant", "content": error_msg})
-            return
+            break
+        except (APIError, Exception) as e:
+            error_fallback = (
+                f"⚠️ **[WORKSTATION COMMUNICATION FAULT]**\n\n"
+                "An unexpected bus error occurred. Please re-enter your command."
+            )
+            break
 
-    if raw_text:
-        update_state_from_text(raw_text)
-        cleaned_text = clean_state_token(raw_text)
-        st.session_state.api_messages.append({"role": "assistant", "content": raw_text})
-        st.session_state.display_messages.append({"role": "assistant", "content": cleaned_text})
+    # Commit successful turn
+    if raw_response:
+        update_state_from_text(raw_response)
+        state_token = extract_state_token(raw_response)
+        clean_text = clean_state_token(raw_response)
+
+        st.session_state.api_messages.append({"role": "user", "content": actual_api_prompt})
+        st.session_state.api_messages.append({"role": "assistant", "content": raw_response})
+
+        st.session_state.display_messages.append({"role": "user", "content": user_input})
+        st.session_state.display_messages.append(
+            {"role": "assistant", "content": clean_text, "state": state_token}
+        )
+    elif error_fallback:
+        st.session_state.display_messages.append({"role": "user", "content": user_input})
+        st.session_state.display_messages.append(
+            {"role": "assistant", "content": error_fallback, "state": ""}
+        )
 
 
 # --- SIDEBAR: TELEMETRY & DOCUMENT DECK ---
@@ -157,6 +184,8 @@ with st.sidebar:
     with col2:
         st.metric("Blank Baseline", st.session_state.state_badge["Blank"])
         st.metric("Measured", st.session_state.state_badge["Measured"])
+
+    st.metric("Supervisor Escalations", st.session_state.state_badge["SupCalls"])
 
     st.divider()
 
@@ -211,6 +240,7 @@ with st.sidebar:
 st.title("Biopharma QC Analytical Terminal")
 st.caption("Simulated Release Testing Platform | UV-Vis Spectrophotometer Workstation 4")
 
+# Load Initial Opener
 if len(st.session_state.display_messages) == 0:
     opener = (
         "**[QC SUITE 2 — WORKSTATION 4]**\n\n"
@@ -223,47 +253,53 @@ if len(st.session_state.display_messages) == 0:
         "* **Consumables:** Calibrated pipettes (P20, P200, P1000), barrier tips, quartz micro-cuvette rack.\n"
         "* **Documentation:** Test Method binder **TM-0428** available in the sidebar document deck."
     )
-    st.session_state.display_messages.append({"role": "assistant", "content": opener})
-    raw_opener = (
-        "STATE: [Power: OFF (0 min) | Blank: NONE | Prep: NONE | Measured: NO | In-Range: UNTESTED | SupCalls: 0]\n\n"
-        + opener
+    initial_state = "STATE: [Power: OFF (0 min) | Blank: NONE | Prep: NONE | Measured: NO | In-Range: UNTESTED | SupCalls: 0]"
+    st.session_state.display_messages.append(
+        {"role": "assistant", "content": opener, "state": initial_state}
     )
-    st.session_state.api_messages.append({"role": "assistant", "content": raw_opener})
+    st.session_state.api_messages.append(
+        {"role": "assistant", "content": f"{initial_state}\n\n{opener}"}
+    )
 
+# Display Chat History with Collapsible State Inspection
 for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg.get("state"):
+            with st.expander("📟 Audit Trail Telemetry", expanded=False):
+                st.code(msg["state"], language="text")
 
-# Responsive Action Layout (3 top, 2 bottom)
+# Quick-Action Button Grid
 st.markdown("##### Standard Analytical Operations")
 r1_c1, r1_c2, r1_c3 = st.columns(3)
 r2_c1, r2_c2 = st.columns(2)
 
-button_action = None
+active_command = None
 with r1_c1:
     if st.button("⚡ Power ON Spectro", use_container_width=True):
-        button_action = "Power ON the Spectrophotometer"
+        active_command = "Power ON the Spectrophotometer"
 with r1_c2:
     if st.button("⏳ Wait for Warm-up", use_container_width=True):
-        button_action = "Wait 20 minutes for lamp stabilization"
+        active_command = "Wait 20 minutes for lamp stabilization"
 with r1_c3:
     if st.button("🧪 Blank Instrument", use_container_width=True):
-        button_action = "Blank with Formulation Buffer"
+        active_command = "Blank with Formulation Buffer"
 
 with r2_c1:
     if st.button("📊 Measure Samples", use_container_width=True):
-        button_action = "Measure sample preparations"
+        active_command = "Measure sample preparations"
 with r2_c2:
     if st.button("📞 Call Supervisor", use_container_width=True):
-        button_action = "Call Supervisor"
+        active_command = "Call Supervisor"
 
-if button_action:
-    execute_turn(button_action)
-    st.rerun()
-
-user_prompt = st.chat_input(
+user_text = st.chat_input(
     "Enter command or calculation data (e.g., 'Prepare sample', 'Calculate', or custom actions)..."
 )
-if user_prompt:
-    execute_turn(user_prompt)
+if user_text:
+    active_command = user_text
+
+# Execute turn with visual spinner feedback
+if active_command:
+    with st.spinner("Processing workstation operation..."):
+        run_llm_turn(active_command)
     st.rerun()
