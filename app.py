@@ -210,8 +210,8 @@ def run_llm_turn(user_input: str):
         except (APIError, Exception) as e:
             print(f"[API ERROR] Unhandled Exception: {type(e).__name__} - {e}")
             error_fallback = (
-                f"⚠️ **[WORKSTATION COMMUNICATION FAULT]**\n\n"
-                f"**Error Details:** `{type(e).__name__}: {e}`"
+                "⚠️ **[WORKSTATION COMMUNICATION FAULT]**\n\n"
+                "An unexpected bus error occurred. Please re-enter your command."
             )
             break
 
