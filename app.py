@@ -253,7 +253,7 @@ with st.sidebar:
             """
             * **1.0 Objective:** Define procedural requirements for determining mAb protein concentration at 280 nm.
             * **2.0 Scope:** Applies to release and in-process testing of mAb Drug Substance (Lot BDS-552).
-            * **3.0 Responsibility:** QC analysts execute testing per method; QC management reviews and dispositions data.
+            * **3.0 Responsibility:** QC analysts execute testing per method; QC management reviews and disposes data.
             """
         )
     with tab2:
@@ -279,8 +279,8 @@ with st.sidebar:
         st.markdown(
             """
             * **6.1 Testing:** Scan samples in duplicate at 280 nm and 320 nm.
-            * **6.2 Correction:** A_corr = A280 - A320.
-            * **6.3 Quantitation:** Calculate concentration: `((A280 - A320) / 1.45) * DF`.
+            * **6.2 Correction:** Calculate corrected absorbance: `A_corr = A280 - A320`.
+            * **6.3 Quantitation:** Calculate concentration: `(A_corr / 1.45) * DF`[cite: 4].
             * **6.4 Precision:** % Difference between duplicates must be **<= 2.0%**.
             """
         )
@@ -313,9 +313,10 @@ if len(st.session_state.display_messages) == 0:
         "Target concentration is approximately **50–60 mg/mL**.\n\n"
         "**Current Bench Status:**\n"
         "* **Spectrophotometer:** POWER OFF (Cold, 0 min).\n"
+        "* **Equipment:** Calibrated pipettors (P20, P200, P1000).\n"
+        "* **Optics & Consumables:** 10 mm quartz micro-cuvette, barrier tips, microcentrifuge tubes, lint-free wipes.\n"
         "* **Sample:** 1x 2.0 mL vial of mAb Drug Substance (Lot BDS-552).\n"
         "* **Reagents:** 1x 500 mL bottle of Formulation Buffer; 1x Milli-Q Water wash station.\n"
-        "* **Consumables:** Calibrated pipettes (P20, P200, P1000), barrier tips, quartz micro-cuvette rack.\n"
         "* **Documentation:** Test Method binder **TM-0428** available in the sidebar document deck."
     )
     initial_state = "STATE: [Power: OFF (0 min) | Blank: NONE | Prep: NONE | Measured: NO | In-Range: UNTESTED | SupCalls: 0]"
