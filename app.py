@@ -385,6 +385,62 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             active_trace_block = trace_block
 
             cuvette_wash_narrative = ""
+    # =========================================================================
+    # 4. INSTRUMENT MEASUREMENT ROUTING (NOW ABOVE PREP)
+    # =========================================================================
+    elif any(k in u_lower for k in ["measure", "scan"]) and "blank" not in u_lower:
+        if "OFF" in power_state:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: Instrument is POWER OFF. "
+                "State that the power switch is OFF and the PC software shows 'Hardware: Offline'. Refuse measurement.]"
+            )
+        elif prep_state == "NONE":
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: Empty sample cell. "
+                "Describe inspecting the cell compartment: no sample preparation has been pipetted into the cuvette. "
+                "The software remains idle. Refuse scan. Stop immediately after reporting cuvette state.]"
+            )
+        else:
+            is_measurement_turn = True
+            is_cold = "WARMING" in power_state
+            jitter = 0.045 if is_cold else 0.000
+
+            if prep_state == "NEAT":
+                rep1_280, rep1_320 = 2.842, 0.084
+                rep2_280, rep2_320 = round(2.855 + jitter, 3), 0.081
+                st.session_state.last_reading_over_range = True
+            elif prep_state == "DILUTED_WATER":
+                base_offset = -0.075 if blank_state == "BUFFER" else 0.000
+                rep1_280, rep1_320 = round(0.781 + base_offset, 3), 0.006
+                rep2_280, rep2_320 = round(0.778 + base_offset + jitter, 3), 0.005
+                st.session_state.last_reading_over_range = False
+            else:
+                base_offset = 0.185 if blank_state == "NONE" else (0.075 if blank_state == "WATER" else 0.000)
+                rep1_280, rep1_320 = round(0.781 + base_offset, 3), 0.006
+                rep2_280, rep2_320 = round(0.778 + base_offset + jitter, 3), 0.005
+                st.session_state.last_reading_over_range = False
+
+            st.session_state.last_readings = {
+                "rep1_280": rep1_280,
+                "rep1_320": rep1_320,
+                "rep2_280": rep2_280,
+                "rep2_320": rep2_320,
+            }
+
+            blank_header = ""
+            if blank_state == "BUFFER":
+                blank_header = "[Baseline Zero Stored: Formulation Buffer | A280 = 0.000 AU | A320 = 0.000 AU]\n"
+            elif blank_state == "WATER":
+                blank_header = "[Baseline Zero Stored: Milli-Q Water | A280 = 0.000 AU | A320 = 0.000 AU]\n"
+
+            trace_block = (
+                f"{blank_header}"
+                f"Prep A (Rep 1): A280 = {rep1_280:.3f} AU | A320 = {rep1_320:.3f} AU\n"
+                f"Prep B (Rep 2): A280 = {rep2_280:.3f} AU | A320 = {rep2_320:.3f} AU"
+            )
+            active_trace_block = trace_block
+
+            cuvette_wash_narrative = ""
             if st.session_state.cuvette_contents not in ["EMPTY", "mAb Sample Preparation"]:
                 cuvette_wash_narrative = (
                     f"The analyst takes the cuvette to the wash station to aspirate the remaining {st.session_state.cuvette_contents}, "
@@ -393,6 +449,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 )
 
             st.session_state.cuvette_contents = "mAb Sample Preparation"
+            st.session_state.state_badge["Measured"] = "YES"  # Direct state update in Python
 
             actual_api_prompt = (
                 f"Measure sample preparations [DIRECTOR NOTE: {cuvette_wash_narrative}"
@@ -401,6 +458,47 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "the raw data station trace is logged automatically by the system bus.]"
             )
 
+    # =========================================================================
+    # 5. SAMPLE PREPARATION ROUTING (NOW BELOW MEASUREMENT)
+    # =========================================================================
+    elif any(k in u_lower for k in ["prepare", "prep", "dilute"]) and not any(k in u_lower for k in ["measure", "scan", "blank"]):
+        is_neat = any(k in u_lower for k in ["neat", "undiluted", "direct"])
+        has_buffer = any(k in u_lower for k in ["buffer", "formulation"])
+        has_water = any(k in u_lower for k in ["water", "milli-q"])
+
+        is_serial_100 = "serial" in u_lower and "100" in u_lower and "900" in u_lower
+        is_direct_100 = any(k in u_lower for k in [
+            "1:100", "1/100", "1 to 100", "100-fold", "100x",
+            "100 df", "df 100", "df of 100", "dilution factor of 100", "dilution factor 100"
+        ])
+
+        if is_neat:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst pipettes neat, undiluted mAb Drug Substance directly into "
+                "duplicate microcentrifuge tubes. Confirm duplicate neat preparations (Prep A and Prep B). "
+                "Update STATE to Prep: NEAT and Measured: NO. Stop immediately without advice.]"
+            )
+        elif (is_serial_100 or is_direct_100) and (has_buffer or not has_water):
+            math_explanation = (
+                "a two-step 1:10 serial dilution (100 µL into 900 µL Formulation Buffer, followed by 100 µL into 900 µL Formulation Buffer), "
+                "yielding a validated final dilution factor of 1:100 (DF = 100)"
+                if is_serial_100
+                else "a 1:100 dilution using Formulation Buffer as the diluent (DF = 100)"
+            )
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst executes duplicate sample preparations using {math_explanation}. "
+                "CRITICAL ARITHMETIC ENFORCEMENT: Confirm duplicate preparations (Prep A and Prep B) at 1:100 dilution factor. "
+                "DO NOT calculate or state 1:1000. Describe pipetting with calibrated pipettors and vortexing tubes. "
+                "Update STATE to Prep: DILUTED_BUFFER and Measured: NO. Stop immediately without advice.]"
+            )
+        elif (is_serial_100 or is_direct_100) and has_water:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst prepares duplicate samples using a 1:100 dilution factor in Milli-Q Water. "
+                "Confirm duplicate preparations (Prep A and Prep B) at 1:100 in water. "
+                "Update STATE to Prep: DILUTED_WATER and Measured: NO. Stop immediately without advice.]"
+            )
+        else:
+            actual_api_prompt = user_input
     # =========================================================================
     # 6. CALCULATION & DISPOSITION ROUTING (DIRECT PYTHON EMISSION)
     # =========================================================================
@@ -857,7 +955,7 @@ else:
                     active_command = "Calculate concentration per TM-0428"
             else:
                 if st.button("📊 Measure Samples", use_container_width=True):
-                    active_command = "Measure sample preparations"
+                    active_command = "Measure samples"
         with r2_c2:
             if st.button("📞 Call Supervisor", use_container_width=True):
                 active_command = "Call Supervisor"
