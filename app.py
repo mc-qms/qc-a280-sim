@@ -1,6 +1,7 @@
 import os
 import re
-from openai import OpenAI
+import time
+from openai import OpenAI, RateLimitError, APIError
 import streamlit as st
 
 # --- PAGE CONFIGURATION ---
@@ -8,7 +9,7 @@ st.set_page_config(
     page_title="QC Bench 4 | UV-Vis Release Testing",
     page_icon="🧪",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 # --- CLIENT & SECRETS INITIALIZATION ---
@@ -20,7 +21,6 @@ except KeyError as e:
     )
     st.stop()
 
-# Load system instructions from repository file
 prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
 try:
     with open(prompt_path, "r", encoding="utf-8") as f:
@@ -37,8 +37,10 @@ client = OpenAI(
 MODEL_ID = "openai/gpt-oss-20b"
 
 # --- SESSION STATE INITIALIZATION ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "display_messages" not in st.session_state:
+    st.session_state.display_messages = []
+if "api_messages" not in st.session_state:
+    st.session_state.api_messages = []
 if "state_badge" not in st.session_state:
     st.session_state.state_badge = {
         "Power": "OFF (0 min)",
@@ -46,12 +48,15 @@ if "state_badge" not in st.session_state:
         "Prep": "NONE",
         "Measured": "NO",
         "In-Range": "UNTESTED",
+        "SupCalls": "0",
     }
+if "last_reading_over_range" not in st.session_state:
+    st.session_state.last_reading_over_range = False
 
 
-def parse_and_strip_state(text: str) -> str:
-    """Extracts STATE token to update UI badges and strips it from dialogue display."""
-    match = re.search(r"^STATE:\s*\[(.*?)\]", text, re.MULTILINE)
+def update_state_from_text(raw_text: str):
+    """Parses STATE token and updates UI telemetry."""
+    match = re.search(r"\*{0,2}STATE:\s*\[(.*?)\]\*{0,2}", raw_text, re.IGNORECASE)
     if match:
         raw_state = match.group(1)
         for item in raw_state.split("|"):
@@ -61,29 +66,84 @@ def parse_and_strip_state(text: str) -> str:
                 if key in st.session_state.state_badge:
                     st.session_state.state_badge[key] = val
 
-        cleaned = re.sub(r"^STATE:\s*\[.*?\]\n*", "", text, flags=re.MULTILINE)
-        return cleaned.strip()
-    return text
+    if "2.842" in raw_text or "2.855" in raw_text:
+        st.session_state.last_reading_over_range = True
+    elif "0.781" in raw_text or "0.706" in raw_text:
+        st.session_state.last_reading_over_range = False
+
+
+def clean_state_token(text: str) -> str:
+    """Strips the STATE line from user-facing conversation display."""
+    cleaned = re.sub(r"\*{0,2}STATE:\s*\[.*?\]\*{0,2}\n*", "", text, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def execute_turn(user_input: str):
-    """Appends user message, calls Groq API, updates state badges, and renders output."""
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    """Executes turn with automatic backoff retry and grounded error handling."""
+    actual_prompt = user_input
+    is_supervisor_call = "supervisor" in user_input.lower()
 
-    payload = [{"role": "system", "content": SYSTEM_SPEC}] + st.session_state.messages
+    if is_supervisor_call:
+        if st.session_state.last_reading_over_range:
+            actual_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: The bench reading currently displays 2.842 AU. "
+                "The supervisor physically walks into the lab suite, looks at the display, and reminds the "
+                "analyst of TM-0428 Section 4.3: re-preparation at an adjusted dilution is explicitly permitted "
+                "on the spot and does NOT require raising an unplanned deviation.]"
+            )
+        elif st.session_state.state_badge["Power"].startswith("OFF"):
+            actual_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: The supervisor walks into the bay, notices the spectrophotometer "
+                "is powered off, and tells the analyst to power on the bench and review TM-0428 before asking for review.]"
+            )
 
-    with st.chat_message("assistant"):
-        response_box = st.empty()
-        response = client.chat.completions.create(
-            model=MODEL_ID,
-            messages=payload,
-            temperature=0.0,
-            stream=False,
-        )
-        raw_text = response.choices[0].message.content
-        cleaned_text = parse_and_strip_state(raw_text)
-        response_box.markdown(cleaned_text)
-        st.session_state.messages.append({"role": "assistant", "content": cleaned_text})
+    st.session_state.display_messages.append({"role": "user", "content": user_input})
+    st.session_state.api_messages.append({"role": "user", "content": actual_prompt})
+
+    payload = [{"role": "system", "content": SYSTEM_SPEC}] + st.session_state.api_messages
+
+    raw_text = None
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=payload,
+                temperature=0.0,
+                stream=False,
+            )
+            raw_text = response.choices[0].message.content
+            break
+        except RateLimitError:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            if is_supervisor_call:
+                error_msg = (
+                    "⚠️ **[SUPERVISOR UNAVAILABLE]**\n\n"
+                    "The supervisor is currently on the floor with QA and didn't pick up the page. "
+                    "Please wait a moment and try calling again."
+                )
+            else:
+                error_msg = (
+                    "⚠️ **[INSTRUMENT DATA BUFFER BUSY]**\n\n"
+                    "The spectrophotometer workstation is synchronizing its audit log. "
+                    "Please wait a moment and retry your action."
+                )
+            st.session_state.display_messages.append({"role": "assistant", "content": error_msg})
+            return
+        except Exception:
+            error_msg = (
+                "⚠️ **[STATION COMMUNICATION TIMEOUT]**\n\n"
+                "Workstation interface signal dropped. Please re-enter your command."
+            )
+            st.session_state.display_messages.append({"role": "assistant", "content": error_msg})
+            return
+
+    if raw_text:
+        update_state_from_text(raw_text)
+        cleaned_text = clean_state_token(raw_text)
+        st.session_state.api_messages.append({"role": "assistant", "content": raw_text})
+        st.session_state.display_messages.append({"role": "assistant", "content": cleaned_text})
 
 
 # --- SIDEBAR: TELEMETRY & DOCUMENT DECK ---
@@ -92,7 +152,7 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Power / Lamp", st.session_state.state_badge["Power"])
+        st.metric("Lamp Status", st.session_state.state_badge["Power"])
         st.metric("Sample Prep", st.session_state.state_badge["Prep"])
     with col2:
         st.metric("Blank Baseline", st.session_state.state_badge["Blank"])
@@ -134,24 +194,26 @@ with st.sidebar:
 
     st.divider()
     if st.button("🔄 Reset Workstation", use_container_width=True):
-        st.session_state.messages = []
+        st.session_state.display_messages = []
+        st.session_state.api_messages = []
         st.session_state.state_badge = {
             "Power": "OFF (0 min)",
             "Blank": "NONE",
             "Prep": "NONE",
             "Measured": "NO",
             "In-Range": "UNTESTED",
+            "SupCalls": "0",
         }
+        st.session_state.last_reading_over_range = False
         st.rerun()
 
 # --- MAIN TERMINAL WORKSPACE ---
 st.title("Biopharma QC Analytical Terminal")
 st.caption("Simulated Release Testing Platform | UV-Vis Spectrophotometer Workstation 4")
 
-# Load Initial Opener if History is Empty
-if len(st.session_state.messages) == 0:
+if len(st.session_state.display_messages) == 0:
     opener = (
-        "**[QC SUITE 2 — UV-VIS WORKSTATION]**\n\n"
+        "**[QC SUITE 2 — WORKSTATION 4]**\n\n"
         "You are logged in at Bench 4 to perform release testing for **mAb Drug Substance (Lot BDS-552)**.\n\n"
         "Target concentration is approximately **50–60 mg/mL**.\n\n"
         "**Current Bench Status:**\n"
@@ -161,40 +223,44 @@ if len(st.session_state.messages) == 0:
         "* **Consumables:** Calibrated pipettes (P20, P200, P1000), barrier tips, quartz micro-cuvette rack.\n"
         "* **Documentation:** Test Method binder **TM-0428** available in the sidebar document deck."
     )
-    st.session_state.messages.append({"role": "assistant", "content": opener})
+    st.session_state.display_messages.append({"role": "assistant", "content": opener})
+    raw_opener = (
+        "STATE: [Power: OFF (0 min) | Blank: NONE | Prep: NONE | Measured: NO | In-Range: UNTESTED | SupCalls: 0]\n\n"
+        + opener
+    )
+    st.session_state.api_messages.append({"role": "assistant", "content": raw_opener})
 
-# Display Chat History
-for msg in st.session_state.messages:
+for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Quick-Action Button Grid
+# Responsive Action Layout (3 top, 2 bottom)
 st.markdown("##### Standard Analytical Operations")
-bcol1, bcol2, bcol3, bcol4, bcol5 = st.columns(5)
+r1_c1, r1_c2, r1_c3 = st.columns(3)
+r2_c1, r2_c2 = st.columns(2)
 
 button_action = None
-with bcol1:
+with r1_c1:
     if st.button("⚡ Power ON Spectro", use_container_width=True):
         button_action = "Power ON the Spectrophotometer"
-with bcol2:
+with r1_c2:
     if st.button("⏳ Wait for Warm-up", use_container_width=True):
         button_action = "Wait 20 minutes for lamp stabilization"
-with bcol3:
+with r1_c3:
     if st.button("🧪 Blank Instrument", use_container_width=True):
         button_action = "Blank with Formulation Buffer"
-with bcol4:
+
+with r2_c1:
     if st.button("📊 Measure Samples", use_container_width=True):
         button_action = "Measure sample preparations"
-with bcol5:
+with r2_c2:
     if st.button("📞 Call Supervisor", use_container_width=True):
         button_action = "Call Supervisor"
 
-# Process Quick-Action Button Input
 if button_action:
     execute_turn(button_action)
     st.rerun()
 
-# Free-Text Input for Custom Actions & Calculations
 user_prompt = st.chat_input(
     "Enter command or calculation data (e.g., 'Prepare sample', 'Calculate', or custom actions)..."
 )
