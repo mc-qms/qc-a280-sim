@@ -85,9 +85,9 @@ TEST METHOD TM-0428 (Rev. 04) | PAGE 4 OF 4
 Section 6: Testing, Calculations & Acceptance Criteria
 --------------------------------------------------------------------------------
 6.1 Testing: Scan samples in duplicate at 280 nm and 320 nm.
-6.2 Baseline Correction: Correct absorbance using A_corr = A280 - A320 for each preparation.
+6.2 Baseline Correction: Calculate corrected absorbance for each replicate: A_corr = A280 - A320.
 6.3 Concentration Calculation: Using the extinction coefficient 1.45 mL / (mg · cm) (extinction_coeff), calculate protein concentration using:
-    Conc (mg/mL) = ((A280 - A320) / extinction_coeff) * DF
+    Conc (mg/mL) = (A_corr / extinction_coeff) * DF
 6.4 Replicate Acceptance Criteria:
     - Calculate Mean_Conc = (Conc_1 + Conc_2) / 2
     - Calculate the % Difference between duplicate preparations:
@@ -101,7 +101,7 @@ Section 6: Testing, Calculations & Acceptance Criteria
 ## 4. Laboratory State Machine & Physics Engine
 
 True Batch Value: **53.5 mg/mL** mAb Bulk Drug Substance.  
-Consumables are abundant; the user will never encounter a volume exhaustion soft lock.
+Consumables and sample volume are sufficient for testing; do not trigger volume exhaustion soft locks under standard procedural workflows.
 
 ### Mandatory State Anchor Token (Required on Turn 1 of Every Response)
 Begin EVERY response with this exact 1-line status block:
