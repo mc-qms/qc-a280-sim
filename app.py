@@ -29,7 +29,7 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
-# Hard 25s timeout with zero internal SDK retries so Python manages the loop
+# Hard 25.0s cap with 0 SDK retries so Python controls the loop
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
@@ -37,7 +37,7 @@ client = OpenAI(
     max_retries=0,
 )
 
-# High-speed, high-adherence production model (~$0.00025 per interaction)
+# High-speed production model (~$0.00025 per interaction)
 MODEL_ID = "meta-llama/llama-3.3-70b-instruct"
 
 # --- SESSION STATE INITIALIZATION ---
@@ -56,6 +56,8 @@ if "state_badge" not in st.session_state:
     }
 if "last_reading_over_range" not in st.session_state:
     st.session_state.last_reading_over_range = False
+if "last_readings" not in st.session_state:
+    st.session_state.last_readings = None
 
 
 def extract_state_token(raw_text: str) -> str:
@@ -78,7 +80,7 @@ def update_state_from_text(raw_text: str):
 
     if "2.842" in raw_text or "2.855" in raw_text:
         st.session_state.last_reading_over_range = True
-    elif "0.781" in raw_text or "0.706" in raw_text or "0.966" in raw_text:
+    elif "0.781" in raw_text or "0.706" in raw_text or "0.966" in raw_text or "0.856" in raw_text:
         st.session_state.last_reading_over_range = False
 
 
@@ -89,67 +91,264 @@ def clean_state_token(text: str) -> str:
 
 
 def run_llm_turn(user_input: str):
-    """Executes turn with strict 25s timeout, window pruning, and explicit max_tokens."""
-    is_supervisor = "supervisor" in user_input.lower()
+    """Executes turn with deterministic physics, strict math evaluation, and template enforcement."""
     actual_api_prompt = user_input
+    u_lower = user_input.lower().strip()
 
-    # Dynamic Director Notes tailored to exact bench state
-    if is_supervisor:
-        power_state = st.session_state.state_badge["Power"]
-        blank_state = st.session_state.state_badge["Blank"]
-        measured_state = st.session_state.state_badge["Measured"]
+    power_state = st.session_state.state_badge["Power"].upper()
+    blank_state = st.session_state.state_badge["Blank"].upper()
+    prep_state = st.session_state.state_badge["Prep"].upper()
+    measured_state = st.session_state.state_badge["Measured"].upper()
 
-        # Precedence Rule 1: Bench completely unpowered/cold
+    # =========================================================================
+    # 1. SUPERVISOR INTERACTION ROUTING
+    # =========================================================================
+    if any(k in u_lower for k in ["supervisor", "ask lead", "elevate"]):
         if power_state.startswith("OFF"):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
                 "the instrument is off, and reminds analyst to power on and review TM-0428 Section 4 before asking for review.]"
             )
-        # Precedence Rule 2: Active reading on display is over-range (2.842 AU)
         elif st.session_state.last_reading_over_range and measured_state == "YES":
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. "
-                "The supervisor physically walks into the lab suite, looks at the display, and reminds the "
-                "analyst of TM-0428 Section 5.3: re-preparation at an adjusted dilution is explicitly permitted "
-                "on the spot and does NOT require raising an unplanned deviation.]"
+                "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. Supervisor walks into the bay, "
+                "looks at the display, and reminds analyst of TM-0428 Section 5.3: re-preparation at an adjusted dilution "
+                "is explicitly permitted on the spot and does NOT require raising an unplanned deviation.]"
             )
-        # Precedence Rule 3: Measured without blanking (Unreferenced baseline)
         elif measured_state == "YES" and blank_state == "NONE":
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst measured sample without blanking (Blank: NONE). "
                 "Supervisor reviews raw scan data, spots complete absence of blank entry, and points out the "
-                "elevated absorbances (~0.96 AU) that will calculate to ~66 mg/mL (exceeding the 50-60 target). "
-                "Commends analyst for stopping before calculating, but explains the run is procedurally compromised "
-                "under TM-0428 §5.1. Logs in-process non-conformance DEV-QC-UNBLANKED for the aborted run and tells "
-                "them to void the prep and re-initialize the bench clean.]"
+                "elevated absorbances (~0.96 AU) that will calculate to ~66 mg/mL (exceeding 50-60 target). "
+                "Commends analyst for stopping before calculating, logs in-process non-conformance DEV-QC-UNBLANKED "
+                "for the aborted run, and tells them to scrap prep and re-initialize bench clean.]"
             )
-        # Precedence Rule 4: Early setup error caught BEFORE scanning sample
         elif measured_state == "NO" and (blank_state == "WATER" or "WARMING" in power_state):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks about an early setup error (cold lamp or water blank) "
                 "before measuring the mAb sample. Supervisor notes no sample was scanned, so no lot release data exists. "
-                "Confirms no deviation is needed: document a contemporaneous note in the raw log, wait for full 20-min "
-                "stabilization, re-zero with Formulation Buffer, and proceed.]"
+                "Confirms no deviation is needed: document contemporaneous note in raw log, wait for 20-min stabilization, "
+                "re-zero with Formulation Buffer, and proceed.]"
             )
-        # Precedence Rule 5: Active measurements are in-range (~0.78 AU)
         elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Analyst asks for a review of completed measurements. "
-                "Supervisor inspects the bench, notes duplicate readings (~0.78 AU) are well within the "
-                "validated 0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 6.4.]"
+                "Call Supervisor [DIRECTOR NOTE: Analyst asks for review of completed measurements. "
+                "Supervisor inspects bench, confirms duplicate readings (~0.78 AU) are well within the "
+                "0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 6.4.]"
             )
-        # Precedence Rule 6: Bench ready and blanked, mid-assay check before measuring
         elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Analyst asks for a mid-assay sanity check. "
-                "Supervisor confirms lamp is stabilized and buffer blank is stored. Confirms setup looks good "
-                "and instructs them to proceed with measuring sample duplicates.]"
+                "Call Supervisor [DIRECTOR NOTE: Analyst asks for a mid-assay sanity check. Supervisor confirms "
+                "lamp is stabilized and buffer blank is stored. Setup is verified; instructs them to measure samples.]"
             )
         else:
             actual_api_prompt = (
-                "Call Supervisor [DIRECTOR NOTE: Supervisor walks into the bay to check progress. "
-                "Provides brief, realistic procedural feedback based on active bench state without doing the work.]"
+                "Call Supervisor [DIRECTOR NOTE: Supervisor steps into bay to check progress. Provides brief, "
+                "realistic procedural feedback based on active bench state without doing the work.]"
             )
+
+    # =========================================================================
+    # 2. INSTRUMENT MEASUREMENT ROUTING (DETERMINISTIC OPTICAL ENGINE)
+    # =========================================================================
+    elif any(k in u_lower for k in ["measure", "scan"]) and "blank" not in u_lower:
+        if "OFF" in power_state:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: Instrument is POWER OFF. "
+                f"State that the optical bench is unenergized and refuse measurement.]"
+            )
+        elif prep_state == "NONE":
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: HARD GATE REFUSAL: No sample prepared. "
+                f"State that no sample has been transferred into the cuvette and refuse measurement.]"
+            )
+        else:
+            is_cold = "WARMING" in power_state
+            jitter = 0.045 if is_cold else 0.000
+
+            if prep_state == "NEAT":
+                rep1_280, rep1_320 = 2.842, 0.084
+                rep2_280, rep2_320 = round(2.855 + jitter, 3), 0.081
+                st.session_state.last_reading_over_range = True
+            elif prep_state == "DILUTED_WATER":
+                base_offset = -0.075 if blank_state == "BUFFER" else 0.000
+                rep1_280, rep1_320 = round(0.781 + base_offset, 3), 0.006
+                rep2_280, rep2_320 = round(0.778 + base_offset + jitter, 3), 0.005
+                st.session_state.last_reading_over_range = False
+            else:  # DILUTED_BUFFER or standard diluted
+                base_offset = 0.185 if blank_state == "NONE" else (0.075 if blank_state == "WATER" else 0.000)
+                rep1_280, rep1_320 = round(0.781 + base_offset, 3), 0.006
+                rep2_280, rep2_320 = round(0.778 + base_offset + jitter, 3), 0.005
+                st.session_state.last_reading_over_range = False
+
+            st.session_state.last_readings = {
+                "rep1_280": rep1_280,
+                "rep1_320": rep1_320,
+                "rep2_280": rep2_280,
+                "rep2_320": rep2_320,
+            }
+
+            blank_header = (
+                "[Baseline Zero Stored: Formulation Buffer | A280 = 0.000 AU | A320 = 0.000 AU]\n"
+                if blank_state == "BUFFER"
+                else ""
+            )
+            trace_block = (
+                f"{blank_header}"
+                f"Prep A (Rep 1): A280 = {rep1_280:.3f} AU | A320 = {rep1_320:.3f} AU\n"
+                f"Prep B (Rep 2): A280 = {rep2_280:.3f} AU | A320 = {rep2_320:.3f} AU"
+            )
+
+            actual_api_prompt = (
+                f"Measure sample preparations [DIRECTOR NOTE: Transcribe the following raw spectrophotometer "
+                f"data trace verbatim into your response, update STATE to Measured: YES, and do not provide "
+                f"unsolicited advice or recommended next steps:\n"
+                f"```\n{trace_block}\n```]"
+            )
+
+    # =========================================================================
+    # 3. CALCULATION & DISPOSITION ROUTING (DETERMINISTIC MATH ENGINE)
+    # =========================================================================
+    elif any(k in u_lower for k in ["calc", "disposition"]):
+        if measured_state != "YES":
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: Pre-Calculation Gate: No analytical data collected (Measured: NO). "
+                f"Refuse calculation and state that samples must be measured first.]"
+            )
+        else:
+            nums = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", user_input)
+            if len(nums) < 4:
+                actual_api_prompt = (
+                    f"{user_input} [DIRECTOR NOTE: The analyst is initiating calculations. "
+                    f"Prompt the analyst to submit the four required parameters: "
+                    f"1) Replicate 1 Corrected Absorbance (A280 - A320), "
+                    f"2) Replicate 2 Corrected Absorbance (A280 - A320), "
+                    f"3) Dilution Factor, and 4) Extinction Coefficient cited in TM-0428. "
+                    f"Use dummy illustrative values like 0.520 and 0.518 in your format prompt "
+                    f"so the assay values are not revealed. Do not perform the calculation yet.]"
+                )
+            else:
+                r = st.session_state.last_readings or {
+                    "rep1_280": 0.781,
+                    "rep1_320": 0.006,
+                    "rep2_280": 0.778,
+                    "rep2_320": 0.005,
+                }
+                exp_a1 = round(r["rep1_280"] - r["rep1_320"], 3)
+                exp_a2 = round(r["rep2_280"] - r["rep2_320"], 3)
+
+                val_a1 = float(nums[0])
+                val_a2 = float(nums[1])
+                val_df = float(nums[2])
+                val_coeff = float(nums[3])
+
+                # Check if entries reconcile with raw bench trace and method parameters
+                diff_a1 = abs(val_a1 - exp_a1)
+                diff_a2 = abs(val_a2 - exp_a2)
+                diff_coeff = abs(val_coeff - 1.45)
+
+                if diff_a1 > 0.002 or diff_a2 > 0.002 or diff_coeff > 0.01:
+                    actual_api_prompt = (
+                        f"{user_input} [DIRECTOR NOTE: Technical Review Check: Submitted values do not reconcile with "
+                        f"raw data trace or TM-0428 §6.3. Expected A_corr1 = {exp_a1:.3f}, Expected A_corr2 = {exp_a2:.3f}, "
+                        f"Extinction Coefficient = 1.45. Reject submission for arithmetic/entry correction. "
+                        f"This is an arithmetic kickback, not a method deviation.]"
+                    )
+                else:
+                    # Deterministic mathematical calculation in Python floats
+                    mean_a = round((val_a1 + val_a2) / 2.0, 3)
+                    conc1 = (val_a1 * val_df) / val_coeff
+                    conc2 = (val_a2 * val_df) / val_coeff
+                    mean_conc = (mean_a * val_df) / val_coeff
+                    pct_diff = (abs(conc1 - conc2) / mean_conc) * 100.0
+
+                    # Evaluate procedural compliance
+                    is_ready = power_state.startswith("READY")
+                    is_buffer_blank = blank_state == "BUFFER"
+                    is_buffer_prep = prep_state == "DILUTED_BUFFER"
+                    is_in_range = 0.200 <= mean_a <= 1.200
+                    is_precise = pct_diff <= 2.0
+
+                    if is_ready and is_buffer_blank and is_buffer_prep and is_in_range and is_precise:
+                        summary_block = (
+                            "================================================================================\n"
+                            "ANALYTICAL TESTING SUMMARY: PASS\n"
+                            "Status: ASSAY COMPLIANT & RELEASED\n"
+                            "--------------------------------------------------------------------------------\n"
+                            f"- Replicate 1 Corrected Absorbance (A_corr1): {val_a1:.3f} AU\n"
+                            f"- Replicate 2 Corrected Absorbance (A_corr2): {val_a2:.3f} AU\n"
+                            f"- Mean Corrected Absorbance (Mean A_corr): {mean_a:.3f} AU (Calculated)\n"
+                            f"- Dilution Factor Applied: {int(val_df)}\n"
+                            "- Extinction Coefficient Used: 1.45 mL / (mg · cm)\n"
+                            f"- Reported Protein Concentration (Mean_Conc): {mean_conc:.1f} mg/mL (Target: 50–60 mg/mL)\n"
+                            f"- Duplicate % Difference: {pct_diff:.2f}% (Acceptance Criteria: <= 2.0%)\n\n"
+                            "QC Review: Method TM-0428 executed in full compliance. Lamp thermal stabilization confirmed, "
+                            "matrix-matched Formulation Buffer blank verified, duplicate preparations within validated "
+                            "linear range (0.200–1.200 AU), replicate precision met.\n"
+                            "================================================================================"
+                        )
+                    else:
+                        findings = []
+                        if not is_ready:
+                            findings.append(
+                                "Section 4.2 Non-Compliance: Spectrophotometer operated prior to 20-minute thermal "
+                                "stabilization; baseline thermal drift exceeded tolerance."
+                            )
+                        if blank_state == "NONE":
+                            findings.append(
+                                "Section 5.1 Non-Compliance: Sample scanned without valid baseline zero. TM-0428 requires "
+                                "baseline zero against Formulation Buffer; raw data record lacks blank entry, resulting in "
+                                f"uncompensated optical background and gross positive matrix bias (~{mean_conc:.1f} mg/mL vs 50–60 mg/mL target)."
+                            )
+                        elif blank_state == "WATER":
+                            findings.append(
+                                "Section 5.1 Non-Compliance: Baseline zero performed against Milli-Q Water instead of "
+                                "Formulation Buffer, introducing matrix excipient baseline bias."
+                            )
+                        if prep_state == "DILUTED_WATER":
+                            findings.append(
+                                "Section 5.2 Non-Compliance: Sample prepared using unapproved diluent (Milli-Q Water "
+                                "instead of Formulation Buffer)."
+                            )
+                        if mean_a > 1.200 or prep_state == "NEAT":
+                            findings.append(
+                                f"Section 5.3 Non-Compliance: Sample absorbance reported at {mean_a:.3f} AU, exceeding "
+                                "validated 1.200 AU linear boundary without utilizing approved re-preparation provision."
+                            )
+                        elif mean_a < 0.200:
+                            findings.append(
+                                f"Section 5.3 Non-Compliance: Sample absorbance reported at {mean_a:.3f} AU, falling "
+                                "below validated 0.200 AU linear range."
+                            )
+                        if not is_precise:
+                            findings.append(
+                                f"Section 6.4 Non-Compliance: Duplicate % Difference ({pct_diff:.2f}%) exceeded "
+                                "maximum allowable threshold of <= 2.0%."
+                            )
+
+                        findings_str = "\n- ".join(findings)
+                        summary_block = (
+                            "================================================================================\n"
+                            "ANALYTICAL TESTING SUMMARY: DEVIATION\n"
+                            "Status: PACKET REJECTED AT TECHNICAL REVIEW (DEV-QC-8412)\n"
+                            "Assay Result: INVALIDATED PRIOR TO RELEASE\n"
+                            "--------------------------------------------------------------------------------\n"
+                            f"- Replicate 1 Corrected Absorbance: {val_a1:.3f} AU\n"
+                            f"- Replicate 2 Corrected Absorbance: {val_a2:.3f} AU\n"
+                            f"- Calculated Mean Concentration (Mean_Conc): {mean_conc:.1f} mg/mL (Analytical Artifact)\n"
+                            f"- Duplicate % Difference: {pct_diff:.2f}%\n\n"
+                            "QC Review Findings:\n"
+                            f"- {findings_str}\n\n"
+                            "Technical Review Disposition: Testing packet rejected during second-person review. "
+                            "Data invalidated; lot cannot be dispositioned on this packet. Corrective Action: Open lab "
+                            "deviation for incomplete method execution, void run, and retest.\n"
+                            "================================================================================"
+                        )
+
+                    actual_api_prompt = (
+                        f"{user_input} [DIRECTOR NOTE: Technical review complete. Output the following "
+                        f"analytical summary block verbatim in your response with no alterations:\n"
+                        f"{summary_block}]"
+                    )
 
     # Sliding window: keep only the most recent 6 messages to protect token budget
     active_history = (
@@ -173,7 +372,7 @@ def run_llm_turn(user_input: str):
                 model=MODEL_ID,
                 messages=payload,
                 temperature=0.0,
-                max_tokens=600,
+                max_tokens=650,
                 stream=False,
             )
             raw_response = response.choices[0].message.content
@@ -194,18 +393,10 @@ def run_llm_turn(user_input: str):
             if attempt == 0:
                 time.sleep(1.5)
                 continue
-            if is_supervisor:
-                error_fallback = (
-                    "⚠️ **[SUPERVISOR UNAVAILABLE]**\n\n"
-                    "The supervisor is currently on the floor with QA and didn't pick up the page. "
-                    "Please wait a moment and try calling again."
-                )
-            else:
-                error_fallback = (
-                    "⚠️ **[INSTRUMENT BUS CONGESTION]**\n\n"
-                    "LIMS audit logging buffer is temporarily saturated. "
-                    "Standby a moment and retry."
-                )
+            error_fallback = (
+                "⚠️ **[INSTRUMENT BUS CONGESTION]**\n\n"
+                "LIMS audit logging buffer is temporarily saturated. Standby a moment and retry."
+            )
             break
         except (APIError, Exception) as e:
             print(f"[API ERROR] Unhandled Exception: {type(e).__name__} - {e}")
@@ -219,6 +410,10 @@ def run_llm_turn(user_input: str):
         update_state_from_text(raw_response)
         state_token = extract_state_token(raw_response)
         clean_text = clean_state_token(raw_response)
+
+        # Strip accidental prompt echoing
+        if clean_text.lower().startswith(user_input.lower()):
+            clean_text = clean_text[len(user_input):].lstrip(":\n -")
 
         st.session_state.api_messages.append({"role": "user", "content": actual_api_prompt})
         st.session_state.api_messages.append({"role": "assistant", "content": raw_response})
@@ -305,6 +500,7 @@ with st.sidebar:
             "SupCalls": "0",
         }
         st.session_state.last_reading_over_range = False
+        st.session_state.last_readings = None
         st.rerun()
 
 # --- MAIN TERMINAL WORKSPACE ---
@@ -372,6 +568,7 @@ if is_terminal:
             "SupCalls": "0",
         }
         st.session_state.last_reading_over_range = False
+        st.session_state.last_readings = None
         st.rerun()
 else:
     power_state = st.session_state.state_badge["Power"].upper()
