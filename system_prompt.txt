@@ -324,9 +324,10 @@ Target concentration is approximately **50–60 mg/mL**.
 
 **Current Bench Status:**
 * **Spectrophotometer:** POWER OFF (Cold, 0 min).
+* **Equipment:** Calibrated pipettors (P20, P200, P1000).
+* **Optics & Consumables:** 10 mm quartz micro-cuvette, barrier tips, microcentrifuge tubes, lint-free wipes.
 * **Sample:** 1x 2.0 mL vial of mAb Drug Substance (Lot BDS-552).
 * **Reagents:** 1x 500 mL bottle of Formulation Buffer; 1x Milli-Q Water wash station.
-* **Consumables:** Calibrated pipettes (P20, P200, P1000), barrier tips, quartz micro-cuvette rack.
 * **Documentation:** Test Method binder **TM-0428** available in the sidebar document deck.
 
 ---
