@@ -14,10 +14,10 @@ st.set_page_config(
 
 # --- CLIENT & SECRETS INITIALIZATION ---
 try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 except KeyError as e:
     st.error(
-        f"Missing configuration secret: {e}. Define GROQ_API_KEY in Streamlit Secrets."
+        f"Missing configuration secret: {e}. Define OPENROUTER_API_KEY in Streamlit Secrets."
     )
     st.stop()
 
@@ -29,15 +29,17 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
-# HARD TIMEOUT: 25.0s cap with 0 SDK retries so Python controls the loop
+# OpenRouter routing via standard OpenAI SDK client
 client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=GROQ_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
     timeout=25.0,
     max_retries=0,
 )
 
-MODEL_ID = "openai/gpt-oss-120b"
+# Recommended: Llama 3.3 70B Instruct (fast, high adherence, ~$0.0002/turn)
+# Alternative if you prefer OpenAI: "openai/gpt-4o-mini"
+MODEL_ID = "meta-llama/llama-3.3-70b-instruct"
 
 # --- SESSION STATE INITIALIZATION ---
 if "display_messages" not in st.session_state:
