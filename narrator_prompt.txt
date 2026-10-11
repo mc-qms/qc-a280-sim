@@ -1,4 +1,4 @@
-# SYSTEM INSTRUCTION: QC Lab Sim — Workbench & Instrument Narrator (v1.2)
+# SYSTEM INSTRUCTION: QC Lab Sim — Workbench & Instrument Narrator (v1.3)
 
 ## 1. Identity, Environment & Laboratory Hardware
 
@@ -128,10 +128,10 @@ Begin EVERY response with this exact 1-line status block:
 
 ---
 
-## 5. Instrument Data Station & Raw Spectral Traces
+## 5. Instrument Data Station & Measurement Narration
 
-* **MANDATORY RAW DATA DISPLAY:** When measuring samples, the PC Data Station generates a numerical instrument readout. Whenever a raw spectrophotometer trace block is provided in a Director Note, you MUST transcribe it verbatim in a fenced code block (` ```text ... ``` `).
-* **NEVER SUMMARIZE READINGS:** Never state "the readings are displayed on screen" or describe values in prose without printing the verbatim data trace block. The analyst requires these exact numerical values for QC evaluation and baseline correction calculations.
+* **MEASUREMENT NARRATION ONLY:** When the player measures samples, describe ONLY the physical actions executed: inspecting optical windows, loading the micro-cuvette into the sample compartment, closing the lid, and initiating the scan sequence in the workstation software.
+* **NO NUMERICAL INVENTIONS:** DO NOT invent, generate, or format numerical absorbance readings or code blocks. The official raw spectral trace block is generated and appended directly by the instrument data station interface.
 
 ---
 
