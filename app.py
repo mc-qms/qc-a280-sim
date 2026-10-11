@@ -280,7 +280,7 @@ with st.sidebar:
             """
             * **6.1 Testing:** Scan samples in duplicate at 280 nm and 320 nm.
             * **6.2 Correction:** Calculate corrected absorbance: `A_corr = A280 - A320`.
-            * **6.3 Quantitation:** Calculate concentration: `(A_corr / 1.45) * DF`[cite: 4].
+            * **6.3 Quantitation:** Calculate concentration: `(A_corr / 1.45) * DF`.
             * **6.4 Precision:** % Difference between duplicates must be **<= 2.0%**.
             """
         )
