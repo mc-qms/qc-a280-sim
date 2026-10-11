@@ -29,7 +29,7 @@ except FileNotFoundError:
     st.error("system_prompt.txt not found. Ensure it is committed in your repository root.")
     st.stop()
 
-# HARD TIMEOUT: 25.0s cap with 0 SDK internal retries so Python controls the loop
+# HARD TIMEOUT: 25.0s cap with 0 SDK retries so Python controls the loop
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
@@ -77,7 +77,7 @@ def update_state_from_text(raw_text: str):
 
     if "2.842" in raw_text or "2.855" in raw_text:
         st.session_state.last_reading_over_range = True
-    elif "0.781" in raw_text or "0.706" in raw_text:
+    elif "0.781" in raw_text or "0.706" in raw_text or "0.966" in raw_text:
         st.session_state.last_reading_over_range = False
 
 
@@ -102,14 +102,30 @@ def run_llm_turn(user_input: str):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench display reads 2.842 AU. "
                 "The supervisor physically walks into the lab suite, looks at the display, and reminds the "
-                "analyst of TM-0428 Section 4.3: re-preparation at an adjusted dilution is explicitly permitted "
+                "analyst of TM-0428 Section 5.3: re-preparation at an adjusted dilution is explicitly permitted "
                 "on the spot and does NOT require raising an unplanned deviation.]"
+            )
+        elif measured_state == "YES" and blank_state == "NONE":
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Analyst measured sample without blanking (Blank: NONE). "
+                "Supervisor reviews raw scan data, spots complete absence of blank entry, and points out the "
+                "elevated absorbances (~0.96 AU) that will calculate to ~66 mg/mL (exceeding the 50-60 target). "
+                "Commends analyst for stopping before calculating, but explains the run is procedurally compromised "
+                "under TM-0428 §5.1. Logs in-process non-conformance DEV-QC-UNBLANKED for the aborted run and tells "
+                "them to void the prep and re-initialize the bench clean.]"
+            )
+        elif measured_state == "NO" and (blank_state == "WATER" or not power_state.startswith("READY")):
+            actual_api_prompt = (
+                "Call Supervisor [DIRECTOR NOTE: Analyst asks about an early setup error (cold lamp or water blank) "
+                "before measuring the mAb sample. Supervisor notes no sample was scanned, so no lot release data exists. "
+                "Confirms no deviation is needed: document a contemporaneous note in the raw log, wait for full 20-min "
+                "stabilization, re-zero with Formulation Buffer, and proceed.]"
             )
         elif measured_state == "YES" and not st.session_state.last_reading_over_range:
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Analyst asks for a review of completed measurements. "
                 "Supervisor inspects the bench, notes duplicate readings (~0.78 AU) are well within the "
-                "validated 0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 5.4.]"
+                "validated 0.200–1.200 AU linear range, and tells them to proceed to calculations per Section 6.4.]"
             )
         elif power_state.startswith("READY") and blank_state == "BUFFER" and measured_state == "NO":
             actual_api_prompt = (
@@ -120,7 +136,7 @@ def run_llm_turn(user_input: str):
         elif power_state.startswith("OFF"):
             actual_api_prompt = (
                 "Call Supervisor [DIRECTOR NOTE: Bench is idle/cold. Supervisor steps into the bay, notes "
-                "the instrument is off, and reminds analyst to power on and review TM-0428 before asking for review.]"
+                "the instrument is off, and reminds analyst to power on and review TM-0428 Section 4 before asking for review.]"
             )
         else:
             actual_api_prompt = (
@@ -150,7 +166,7 @@ def run_llm_turn(user_input: str):
                 model=MODEL_ID,
                 messages=payload,
                 temperature=0.0,
-                max_tokens=600,  # Caps reservation budget to avoid HTTP 413
+                max_tokens=600,
                 stream=False,
             )
             raw_response = response.choices[0].message.content
@@ -215,47 +231,57 @@ def run_llm_turn(user_input: str):
 with st.sidebar:
     st.header("🔬 Workstation Telemetry")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Lamp Status", st.session_state.state_badge["Power"])
-        st.metric("Sample Prep", st.session_state.state_badge["Prep"])
-    with col2:
-        st.metric("Blank Baseline", st.session_state.state_badge["Blank"])
-        st.metric("Measured", st.session_state.state_badge["Measured"])
-
-    st.metric("Supervisor Escalations", st.session_state.state_badge["SupCalls"])
+    b = st.session_state.state_badge
+    telemetry_table = f"""
+| Instrument Parameter | Status |
+| :--- | :--- |
+| **Lamp Status** | `{b['Power']}` |
+| **Blank Baseline** | `{b['Blank']}` |
+| **Sample Prep** | `{b['Prep']}` |
+| **Measurement Run** | `{b['Measured']}` |
+"""
+    st.markdown(telemetry_table)
 
     st.divider()
 
-    st.subheader("📋 Document Deck: TM-0428 (Rev. 04)")
-    tab1, tab2, tab3 = st.tabs(["Page 1", "Page 2", "Page 3"])
+    st.subheader("📋 Protein Conc. by UV: TM-0428 (Rev. 04)")
+    tab1, tab2, tab3, tab4 = st.tabs(["Page 1", "Page 2", "Page 3", "Page 4"])
 
     with tab1:
-        st.caption("Section 3: Equipment & System Suitability")
+        st.caption("Sections 1–3: Purpose, Scope & Responsibility")
         st.markdown(
             """
-            * **3.1 Instrument:** Dual-beam UV-Vis with quartz micro-cuvette (10 mm pathlength).
-            * **3.2 Lamp Warm-Up:** Lamps must stabilize **>= 20 minutes** before blanking or sample analysis.
-            * **3.3 Optical Inspection:** Ensure quartz optical faces are clean, unchipped, and properly oriented.
+            * **1.0 Objective:** Define procedural requirements for determining mAb protein concentration at 280 nm.
+            * **2.0 Scope:** Applies to release and in-process testing of mAb Drug Substance (Lot BDS-552).
+            * **3.0 Responsibility:** QC analysts execute testing per method; QC management reviews and dispositions data.
             """
         )
     with tab2:
-        st.caption("Section 4: Solution Preparation & Blanking")
+        st.caption("Section 4: Equipment & System Setup")
         st.markdown(
             """
-            * **4.1 Baseline Zero (Blank):** Zero against **Formulation Buffer**. Do NOT use water; matrix excipients require baseline subtraction.
-            * **4.2 Sample Prep:** Prepare duplicate independent 1:100 dilutions (Prep A and B) using Formulation Buffer as diluent.
-            * **4.3 Linear Range & Re-Prep:** Validated linear range is **0.200 to 1.200 AU** at 280 nm. If reading exceeds 1.200 AU, re-preparation with adjusted dilution is permitted and does NOT constitute a deviation.
+            * **4.1 Instrument:** Dual-beam UV-Vis spectrophotometer with 10 mm quartz micro-cuvette.
+            * **4.2 Lamp Warm-Up:** Switch on D2 and W lamps; stabilize **>= 20 minutes** before blanking or sample analysis.
+            * **4.3 Optical Inspection:** Inspect quartz optical faces for cleanliness, scratches, or chips.
             """
         )
     with tab3:
-        st.caption("Section 5: Testing & Acceptance Criteria")
+        st.caption("Section 5: Solution Preparation & Blanking")
         st.markdown(
             """
-            * **5.1 Wavelengths:** Record 280 nm (protein peak) and 320 nm (scatter/turbidity).
-            * **5.2 Correction:** A_corr = A280 - A320
-            * **5.3 Quantitation:** Extinction Coefficient = 1.45 mL / (mg · cm)
-            * **5.4 Precision:** % Difference between duplicates must be **<= 2.0%**.
+            * **5.1 Baseline Zero (Blank):** Zero the spectrophotometer with **Formulation Buffer**.
+            * **5.2 Sample Prep:** Prepare duplicate independent dilutions using a **1:100 dilution factor (DF)** with Formulation Buffer as diluent.
+            * **5.3 Linear Range & Re-Prep:** Validated linear range is **0.200 to 1.200 AU** at 280 nm. If reading exceeds 1.200 AU, re-preparation with adjusted dilution is permitted and does NOT constitute a deviation.
+            """
+        )
+    with tab4:
+        st.caption("Section 6: Testing, Calculations & Acceptance Criteria")
+        st.markdown(
+            """
+            * **6.1 Testing:** Scan samples in duplicate at 280 nm and 320 nm.
+            * **6.2 Correction:** A_corr = A280 - A320.
+            * **6.3 Quantitation:** Calculate concentration: `((A280 - A320) / 1.45) * DF`.
+            * **6.4 Precision:** % Difference between duplicates must be **<= 2.0%**.
             """
         )
 
@@ -277,6 +303,7 @@ with st.sidebar:
 # --- MAIN TERMINAL WORKSPACE ---
 st.title("Biopharma QC Analytical Terminal")
 st.caption("Simulated Release Testing Platform | UV-Vis Spectrophotometer Workstation 4")
+st.caption("💡 *Analytical Tip: Allow 10–15 seconds between bench actions to observe instrument stabilization and maintain audit trail synchronization.*")
 
 # Load Initial Opener
 if len(st.session_state.display_messages) == 0:
@@ -287,7 +314,7 @@ if len(st.session_state.display_messages) == 0:
         "**Current Bench Status:**\n"
         "* **Spectrophotometer:** POWER OFF (Cold, 0 min).\n"
         "* **Sample:** 1x 2.0 mL vial of mAb Drug Substance (Lot BDS-552).\n"
-        "* **Reagents:** 1x 500 mL bottle of Formulation Buffer; 1x 1000 mL bottle of HPLC-grade Water.\n"
+        "* **Reagents:** 1x 500 mL bottle of Formulation Buffer; 1x Milli-Q Water wash station.\n"
         "* **Consumables:** Calibrated pipettes (P20, P200, P1000), barrier tips, quartz micro-cuvette rack.\n"
         "* **Documentation:** Test Method binder **TM-0428** available in the sidebar document deck."
     )
@@ -299,7 +326,6 @@ if len(st.session_state.display_messages) == 0:
         {"role": "assistant", "content": f"{initial_state}\n\n{opener}"}
     )
 
-# Display Chat History with Collapsible State Inspection
 for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -307,28 +333,88 @@ for msg in st.session_state.display_messages:
             with st.expander("📟 Audit Trail Telemetry", expanded=False):
                 st.code(msg["state"], language="text")
 
-# Responsive Action Layout (3 top, 2 bottom)
+# Determine if the analytical session has reached a terminal conclusion
+last_assistant_content = ""
+for m in reversed(st.session_state.display_messages):
+    if m["role"] == "assistant":
+        last_assistant_content = m["content"]
+        break
+
+is_terminal = (
+    "ANALYTICAL TESTING SUMMARY:" in last_assistant_content
+    or "DEV-QC-UNBLANKED" in last_assistant_content
+    or "DATA INTEGRITY FAILURE" in last_assistant_content
+)
+
+# --- CONTEXT-AWARE ANALYTICAL OPERATIONS ---
 st.markdown("##### Standard Analytical Operations")
-r1_c1, r1_c2, r1_c3 = st.columns(3)
-r2_c1, r2_c2 = st.columns(2)
 
 active_command = None
-with r1_c1:
-    if st.button("⚡ Power ON Spectro", use_container_width=True):
-        active_command = "Power ON the Spectrophotometer"
-with r1_c2:
-    if st.button("⏳ Wait for Warm-up", use_container_width=True):
-        active_command = "Wait 20 minutes for lamp stabilization"
-with r1_c3:
-    if st.button("🧪 Blank Instrument", use_container_width=True):
-        active_command = "Blank with Formulation Buffer"
 
-with r2_c1:
-    if st.button("📊 Measure Samples", use_container_width=True):
-        active_command = "Measure sample preparations"
-with r2_c2:
-    if st.button("📞 Call Supervisor", use_container_width=True):
-        active_command = "Call Supervisor"
+if is_terminal:
+    if st.button("🔄 Reset Workstation for Next Analytical Session", use_container_width=True):
+        st.session_state.display_messages = []
+        st.session_state.api_messages = []
+        st.session_state.state_badge = {
+            "Power": "OFF (0 min)",
+            "Blank": "NONE",
+            "Prep": "NONE",
+            "Measured": "NO",
+            "In-Range": "UNTESTED",
+            "SupCalls": "0",
+        }
+        st.session_state.last_reading_over_range = False
+        st.rerun()
+else:
+    power_state = st.session_state.state_badge["Power"].upper()
+    is_cold = "OFF" in power_state
+    is_warming = "WARMING" in power_state
+
+    # If warming: 3 top, 2 bottom (includes neutral "Wait" button)
+    if is_warming:
+        r1_c1, r1_c2, r1_c3 = st.columns(3)
+        r2_c1, r2_c2 = st.columns(2)
+
+        with r1_c1:
+            if st.button("🧪 Prepare Sample", use_container_width=True):
+                active_command = "Prepare Sample"
+        with r1_c2:
+            if st.button("⏳ Wait", use_container_width=True):
+                active_command = "Wait 20 minutes for lamp stabilization"
+        with r1_c3:
+            if st.button("🧪 Blank Instrument", use_container_width=True):
+                active_command = "Blank with Formulation Buffer"
+
+        with r2_c1:
+            if st.button("📊 Measure Samples", use_container_width=True):
+                active_command = "Measure sample preparations"
+        with r2_c2:
+            if st.button("📞 Call Supervisor", use_container_width=True):
+                active_command = "Call Supervisor"
+
+    # If cold or >= 20 min ready: clean 2x2 grid (Wait button vanishes)
+    else:
+        r1_c1, r1_c2 = st.columns(2)
+        r2_c1, r2_c2 = st.columns(2)
+
+        with r1_c1:
+            if is_cold:
+                if st.button("⚡ Power ON Instrument", use_container_width=True):
+                    active_command = "Power ON the Spectrophotometer"
+            else:
+                if st.button("🧪 Prepare Sample", use_container_width=True):
+                    active_command = "Prepare Sample"
+
+        with r1_c2:
+            if st.button("🧪 Blank Instrument", use_container_width=True):
+                active_command = "Blank with Formulation Buffer"
+
+        with r2_c1:
+            if st.button("📊 Measure Samples", use_container_width=True):
+                active_command = "Measure sample preparations"
+        with r2_c2:
+            if st.button("📞 Call Supervisor", use_container_width=True):
+                active_command = "Call Supervisor"
 
 user_text = st.chat_input(
     "Enter command or calculation data (e.g., 'Prepare sample', 'Calculate', or custom actions)..."
