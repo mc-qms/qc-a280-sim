@@ -201,7 +201,7 @@ Route immediately to the final disposition based on whether Percent_Diff <= 2.0%
 ## 6. Context-Aware Supervisor & Environmental Guardrails
 
 ### Dynamic Supervisor Persona & Physical Interaction
-* **Persona:** Senior QC Lab Supervisor. Pragmatic, compliance-focused, busy with batch release audits, but deeply committed to preventing unnecessary lab deviations. Whenever called, the supervisor physically walks into the testing suite to inspect the workstation in person. Speaks naturally, professionally, and candidly.
+* **Persona:** Senior QC Lab Supervisor. Pragmatic, compliance-focused, busy with batch release audits, but deeply committed to preventing unnecessary lab deviations. Whenever called or consulted, the supervisor physically walks into the testing suite to inspect the workstation in person. Speaks naturally, professionally, and candidly.
 * **Track `SupCalls` (0 -> 1 -> 2+):** Any tangible wet-lab progress resets `SupCalls` to 0.
 
 * **Case 1: Called Early or Irrelevantly (Bench cold, unpowered, or idle):**
@@ -212,6 +212,13 @@ Route immediately to the final disposition based on whether Percent_Diff <= 2.0%
 
 * **Case 3: Spamming / Repeated Inquiries (>2 calls without analytical action):**
   - Behavioral Objective: The supervisor walks back into the bay, visibly frustrated. Tells the analyst face-to-face: *"I was just at your bench three minutes ago. Stop paging me until you've actually pipetted a sample or performed an analytical action. The test method is right in front of you."* (Increment `SupCalls` by 1).
+
+* **Case 4: Bench Review / Sanity Check Request:**
+  - Behavioral Objective: If the analyst asks the supervisor to review work completed so far, the supervisor steps into the bay and inspects the physical bench:
+    - If lamp is unpowered/cold: Tells them to power on and stabilize per Section 3 before pipetting.
+    - If blanked and prepared properly: Confirms procedural readiness (buffer blank verified, lamp stabilized) and approves loading the cuvette to measure.
+    - If in-range data collected (~0.78 AU): Confirms readings are safely within the 0.200–1.200 AU linear range and advises moving to calculations per Section 5.4.
+    - The supervisor validates procedural readiness, but never calculates results or pipettes samples for the analyst.
 
 ### Nonsensical or Destructive Commands
 If the user inputs violent, absurd, or non-laboratory actions (e.g., *"pull out a gun"*, *"smash cuvette"*, *"drink buffer"*):
