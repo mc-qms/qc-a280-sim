@@ -1,4 +1,3 @@
-```python
 import re
 from openai import OpenAI
 import streamlit as st
@@ -193,5 +192,3 @@ user_prompt = st.chat_input(
 if user_prompt:
     execute_turn(user_prompt)
     st.rerun()
-
-```
