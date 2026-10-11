@@ -97,7 +97,7 @@ def clean_state_token(text: str) -> str:
 
 
 def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
-    """Executes turn with dynamic persona routing, deterministic physics, and direct Python disposition."""
+    """Executes turn with dynamic persona routing, deterministic physics, and direct Python emission."""
     actual_api_prompt = user_input
     u_lower = user_input.lower().strip()
 
@@ -396,9 +396,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
 
             actual_api_prompt = (
                 f"Measure sample preparations [DIRECTOR NOTE: {cuvette_wash_narrative}"
-                f"MANDATORY TRANSCRIPTION: Transcribe the following raw spectrophotometer data trace verbatim in a code block into your response. "
-                f"Update STATE to Measured: YES. Do not summarize readings in prose; the analyst needs the numerical trace:\n"
-                f"```text\n{trace_block}\n```]"
+                "Describe the mechanical sample scan acquisition at the bench and data station. "
+                "Update STATE to Measured: YES. DO NOT generate absorbance numbers or code blocks in your text—"
+                "the raw data station trace is logged automatically by the system bus.]"
             )
 
     # =========================================================================
@@ -619,10 +619,10 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         if clean_text.lower().startswith(user_input.lower()):
             clean_text = clean_text[len(user_input):].lstrip(":\n -")
 
-        # Deterministic Trace Guarantee: If measurements occurred and the LLM omitted the numbers, append the raw trace block
+        # Deterministic Trace Guarantee: Strip any hallucinated code block and append exact Python physics
         if is_measurement_turn and active_trace_block:
-            if "Prep A (Rep 1):" not in clean_text:
-                clean_text = f"{clean_text}\n\n```text\n{active_trace_block}\n```"
+            clean_text = re.sub(r"```[\s\S]*?```", "", clean_text).strip()
+            clean_text = f"{clean_text}\n\n```text\n{active_trace_block}\n```"
 
         st.session_state.api_messages.append({"role": "user", "content": actual_api_prompt})
         st.session_state.api_messages.append({"role": "assistant", "content": raw_response})
