@@ -37,7 +37,7 @@ client = OpenAI(
     max_retries=0,
 )
 
-MODEL_ID = "llama-3.3-70b-versatile"
+MODEL_ID = "openai/gpt-oss-120b"
 
 # --- SESSION STATE INITIALIZATION ---
 if "display_messages" not in st.session_state:
