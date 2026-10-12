@@ -433,9 +433,11 @@ def run_llm_turn(user_input: str):
 # =============================================================================
 # SIDEBAR: AUDIT STATE & METHOD BINDER
 # =============================================================================
-st.subheader("🖥️ Hardware Audit State")
+with st.sidebar:
+    st.subheader("🖥️ Hardware Audit State")
     for param, status in st.session_state.state_badge.items():
         st.markdown(f"**{param}:** `{status}`")
+
     if st.button("🔄 Reset Workstation Bay", use_container_width=True):
         reset_entire_workstation()
         st.rerun()
@@ -488,7 +490,6 @@ st.subheader("🖥️ Hardware Audit State")
             * **6.5 Release Limits:** BDS-552 release range is **50.0 – 60.0 mg/mL**.
             """
         )
-
 # =============================================================================
 # MAIN INTERFACE: WORKBENCH CONSOLE
 # =============================================================================
