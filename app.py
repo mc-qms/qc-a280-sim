@@ -937,5 +937,3 @@ if active_command:
     with st.spinner("Processing workstation operation..."):
         run_llm_turn(active_command, is_supervisor_action=is_supervisor_click)
     st.rerun()
-
-```
