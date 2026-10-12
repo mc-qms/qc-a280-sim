@@ -70,6 +70,8 @@ if "awaiting_calc" not in st.session_state:
     st.session_state.awaiting_calc = False
 if "measured_while_warming" not in st.session_state:
     st.session_state.measured_while_warming = False
+if "disposition_status" not in st.session_state:
+    st.session_state.disposition_status = None
 
 
 def extract_state_token(raw_text: str) -> str:
@@ -145,17 +147,19 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     else:
         is_prep_submission = False
 
-    # Calculation Slot-Filling (Captures bare numeric inputs: '0.775, 0.773, 100, 1.45')
+    # Calculation Slot-Filling: Strip replicate labels so '1' and '2' don't hijack index 0 and 1
+    cleaned_calc_input = re.sub(r"\b(?:rep|replicate|r)\s*[12]\b", "", u_lower)
+    nums_in_input = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", cleaned_calc_input)
+    is_calc_escape = is_global_escape or "?" in user_input
+
     is_calc_submission = False
-    nums_in_input = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", user_input)
     if st.session_state.awaiting_calc:
-        if is_global_escape:
+        if is_calc_escape:
             st.session_state.awaiting_calc = False
         else:
+            # Unconditionally submit so Route 6's <4 check can re-prompt if incomplete
             st.session_state.awaiting_calc = False
             is_calc_submission = True
-    elif measured_state == "YES" and len(nums_in_input) >= 4 and not is_global_escape:
-        is_calc_submission = True
 
     # =========================================================================
     # 1. SUPERVISOR ROUTING (SUPERVISOR SPEC ACTIVE)
@@ -172,6 +176,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             )
         # Hierarchy 2: COMPOUND FAILURE (Fatal First: Invalid Blank + Neat Sample)
         elif measured_state == "YES" and blank_state != "BUFFER" and (st.session_state.last_reading_over_range or prep_state == "NEAT"):
+            st.session_state.disposition_status = "DEVIATION"
             blank_desc = (
                 "complete omission of a baseline zero (§5.1)"
                 if blank_state == "NONE"
@@ -197,6 +202,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             )
         # Hierarchy 4: Invalid Blank ONLY (Diluted sample, but Blank is NONE or WATER)
         elif measured_state == "YES" and blank_state in ["NONE", "WATER"]:
+            st.session_state.disposition_status = "DEVIATION"
             blank_desc = "without blanking (Blank: NONE)" if blank_state == "NONE" else "with Milli-Q Water instead of Formulation Buffer"
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -491,7 +497,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 f"Refuse calculation and state that no scan data exists in the active run buffer.]"
             )
         else:
-            nums = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", user_input)
+            nums = nums_in_input
             if len(nums) < 4:
                 st.session_state.awaiting_calc = True
                 actual_api_prompt = (
@@ -500,8 +506,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                     "1) Replicate 1 Corrected Absorbance (A280 - A320), "
                     "2) Replicate 2 Corrected Absorbance (A280 - A320), "
                     "3) Dilution Factor, and "
-                    "4) Extinction Coefficient cited in TM-0428 Page 4 / §6.3 (where E = 1.45). "
-                    "Show the format example: '0.775, 0.773, 100, 1.45'. Do not perform calculation yet.]"
+                    "4) Extinction Coefficient cited in TM-0428 Section 6.3 (sidebar Page 4). "
+                    "Provide format guidance using dummy illustrative numbers ONLY: '0.520, 0.518, 100, 1.32'. "
+                    "CRITICAL: Do NOT disclose the true extinction coefficient or actual assay values. Do not perform calculation yet.]"
                 )
             else:
                 st.session_state.awaiting_calc = False
@@ -526,8 +533,8 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 if diff_a1 > 0.002 or diff_a2 > 0.002 or diff_coeff > 0.01:
                     actual_api_prompt = (
                         f"{user_input} [DIRECTOR NOTE: Technical Review Check: Submitted values do not reconcile with "
-                        f"raw data trace or TM-0428 §6.3. Expected A_corr1 = {exp_a1:.3f}, Expected A_corr2 = {exp_a2:.3f}, "
-                        f"Extinction Coefficient = 1.45. Reject submission for arithmetic correction. This is not a deviation.]"
+                        f"raw data trace or TM-0428 §6.3. Expected A_corr1 = {exp_a1:.3f}, Expected A_corr2 = {exp_a2:.3f}. "
+                        "Reject submission for arithmetic correction. Do NOT disclose expected extinction coefficient. This is not a deviation.]"
                     )
                 else:
                     mean_a = round((val_a1 + val_a2) / 2.0, 3)
@@ -543,6 +550,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                     is_precise = pct_diff <= 2.0
 
                     if is_ready and is_buffer_blank and is_buffer_prep and is_in_range and is_precise:
+                        st.session_state.disposition_status = "PASS"
                         summary_block = (
                             "================================================================================\n"
                             "ANALYTICAL TESTING SUMMARY: PASS\n"
@@ -563,6 +571,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                             "================================================================================"
                         )
                     else:
+                        st.session_state.disposition_status = "DEVIATION"
                         findings = []
                         if not is_ready or st.session_state.measured_while_warming:
                             findings.append(
@@ -705,6 +714,10 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             clean_text = re.sub(r"```[\s\S]*?```", "", clean_text).strip()
             clean_text = f"{clean_text}\n\n```text\n{active_trace_block}\n```"
 
+        # Universal Safety Net: Detect any out-of-band deviation tokens
+        if "DEV-QC-" in clean_text or "DATA INTEGRITY FAILURE" in clean_text:
+            st.session_state.disposition_status = "DEVIATION"
+
         # SINGLE SOURCE OF TRUTH: Audit trail badge matches Python state exactly
         authoritative_state_token = (
             f"STATE: [Power: {st.session_state.state_badge['Power']} | "
@@ -807,6 +820,7 @@ with st.sidebar:
         st.session_state.awaiting_prep = False
         st.session_state.awaiting_calc = False
         st.session_state.measured_while_warming = False
+        st.session_state.disposition_status = None
         st.rerun()
 
 # --- MAIN TERMINAL WORKSPACE ---
@@ -844,17 +858,8 @@ for msg in st.session_state.display_messages:
             with st.expander("📟 Audit Trail Telemetry", expanded=False):
                 st.code(msg["state"], language="text")
 
-last_assistant_content = ""
-for m in reversed(st.session_state.display_messages):
-    if m["role"] == "assistant":
-        last_assistant_content = m["content"]
-        break
-
-is_terminal = (
-    "ANALYTICAL TESTING SUMMARY:" in last_assistant_content
-    or "DEV-QC-" in last_assistant_content
-    or "DATA INTEGRITY FAILURE" in last_assistant_content
-)
+# Determine terminal state strictly from state ownership
+is_terminal = st.session_state.disposition_status is not None
 
 # --- CONTEXT-AWARE ANALYTICAL OPERATIONS ---
 st.markdown("##### Standard Analytical Operations")
@@ -863,7 +868,35 @@ active_command = None
 is_supervisor_click = False
 
 if is_terminal:
-    if st.button("🔄 Reset Workstation for Next Analytical Session", use_container_width=True):
+    is_pass = (st.session_state.disposition_status == "PASS")
+    
+    if is_pass:
+        st.success("🏁 **ANALYTICAL SESSION CONCLUDED: SPECIFICATION CONFORMANCE CONFIRMED**")
+    else:
+        st.error("🏁 **ANALYTICAL SESSION CONCLUDED: LOT DISPOSITION REJECTED**")
+
+    st.markdown("###### Session Audit Dossier")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.metric(
+            label="Disposition Status", 
+            value="RELEASE APPROVED" if is_pass else "RUN VOIDED"
+        )
+    with d2:
+        st.metric(
+            label="Supervisor Calls Logged", 
+            value=f"{st.session_state.state_badge.get('SupCalls', '0')} Consultations"
+        )
+    with d3:
+        lamp_audit = "Cold (<20 min)" if st.session_state.measured_while_warming else "Stabilized (>=20 min)"
+        st.metric(
+            label="Optical State at Acquisition", 
+            value=lamp_audit
+        )
+
+    st.caption("Analytical run record and electronic signatures committed to audit buffer. The workstation is locked.")
+
+    if st.button("🔄 Close Run & Reset Workstation for Next Session", use_container_width=True):
         st.session_state.display_messages = []
         st.session_state.api_messages = []
         st.session_state.state_badge = {
@@ -881,6 +914,7 @@ if is_terminal:
         st.session_state.awaiting_prep = False
         st.session_state.awaiting_calc = False
         st.session_state.measured_while_warming = False
+        st.session_state.disposition_status = None
         st.rerun()
 
 elif st.session_state.selecting_blank:
