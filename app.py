@@ -1,3 +1,4 @@
+```python
 import os
 import re
 import time
@@ -98,6 +99,14 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     is_supervisor = is_supervisor_action or any(k in u_lower for k in supervisor_keywords)
     active_system_spec = SUPERVISOR_SPEC if is_supervisor else NARRATOR_SPEC
 
+    # Track supervisor calls before freezing state string
+    if is_supervisor:
+        try:
+            curr_calls = int(st.session_state.state_badge.get("SupCalls", 0))
+            st.session_state.state_badge["SupCalls"] = str(curr_calls + 1)
+        except ValueError:
+            st.session_state.state_badge["SupCalls"] = "1"
+
     power_state = st.session_state.state_badge["Power"].upper()
     blank_state = st.session_state.state_badge["Blank"].upper()
     prep_state = st.session_state.state_badge["Prep"].upper()
@@ -105,13 +114,6 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
 
     is_measurement_turn = False
     active_trace_block = None
-
-   if is_supervisor:
-        try:
-            curr_calls = int(st.session_state.state_badge.get("SupCalls", 0))
-            st.session_state.state_badge["SupCalls"] = str(curr_calls + 1)
-        except ValueError:
-            st.session_state.state_badge["SupCalls"] = "1"
 
     current_frozen_state = (
         f"STATE: [Power: {st.session_state.state_badge['Power']} | "
@@ -122,6 +124,26 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         f"SupCalls: {st.session_state.state_badge['SupCalls']}]"
     )
 
+    # =========================================================================
+    # PENDING-INTENT HANDLER: SAMPLE PREPARATION SLOT FILLING
+    # =========================================================================
+    is_global_escape = any(k in u_lower for k in [
+        "supervisor", "lead", "power", "blank", "wait", "method", "page", "reset", "calc"
+    ])
+    if st.session_state.awaiting_prep:
+        if is_global_escape:
+            st.session_state.awaiting_prep = False
+            is_prep_submission = False
+        else:
+            st.session_state.awaiting_prep = False
+            is_prep_submission = True
+    else:
+        is_prep_submission = False
+
+    # =========================================================================
+    # 1. SUPERVISOR ROUTING (SUPERVISOR SPEC ACTIVE)
+    # =========================================================================
+    if is_supervisor:
         # Hierarchy 1: Bench unpowered/cold
         if power_state.startswith("OFF"):
             actual_api_prompt = (
@@ -237,6 +259,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             "'Hardware: Online | Lamps: Ignited | Status: LAMP WARMING (2 min / 20 min required)'. "
             "CRITICAL: DO NOT do subtraction math. Stop immediately after reporting software status.]"
         )
+
     # =========================================================================
     # 2B. INSTRUMENT WARMUP / WAIT ROUTING (PYTHON STATE OWNERSHIP)
     # =========================================================================
@@ -255,6 +278,7 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
                 "'Hardware: Online | Lamps: Stabilized | Status: LAMP READY (>=20 min)'. "
                 "Stop immediately after reporting software status without providing unsolicited advice.]"
             )
+
     # =========================================================================
     # 3. BLANKING ROUTING (NARRATOR SPEC ACTIVE)
     # =========================================================================
@@ -659,7 +683,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         )
 
         st.session_state.api_messages.append({"role": "user", "content": actual_api_prompt})
-        st.session_state.api_messages.append({"role": "assistant", "content": f"{authoritative_state_token}\n\n{clean_text}"})
+        st.session_state.api_messages.append(
+            {"role": "assistant", "content": f"{authoritative_state_token}\n\n{clean_text}"}
+        )
 
         st.session_state.display_messages.append({"role": "user", "content": user_input})
         st.session_state.display_messages.append(
@@ -912,3 +938,5 @@ if active_command:
     with st.spinner("Processing workstation operation..."):
         run_llm_turn(active_command, is_supervisor_action=is_supervisor_click)
     st.rerun()
+
+```
