@@ -106,6 +106,13 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
     is_measurement_turn = False
     active_trace_block = None
 
+   if is_supervisor:
+        try:
+            curr_calls = int(st.session_state.state_badge.get("SupCalls", 0))
+            st.session_state.state_badge["SupCalls"] = str(curr_calls + 1)
+        except ValueError:
+            st.session_state.state_badge["SupCalls"] = "1"
+
     current_frozen_state = (
         f"STATE: [Power: {st.session_state.state_badge['Power']} | "
         f"Blank: {st.session_state.state_badge['Blank']} | "
@@ -114,32 +121,6 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
         f"In-Range: {st.session_state.state_badge['In-Range']} | "
         f"SupCalls: {st.session_state.state_badge['SupCalls']}]"
     )
-
-    # =========================================================================
-    # PENDING-INTENT HANDLER: SAMPLE PREPARATION SLOT FILLING
-    # =========================================================================
-    is_global_escape = any(k in u_lower for k in [
-        "supervisor", "lead", "power", "blank", "wait", "method", "page", "reset", "calc"
-    ])
-    if st.session_state.awaiting_prep:
-        if is_global_escape:
-            st.session_state.awaiting_prep = False
-            is_prep_submission = False
-        else:
-            st.session_state.awaiting_prep = False
-            is_prep_submission = True
-    else:
-        is_prep_submission = False
-
-    # =========================================================================
-    # 1. SUPERVISOR ROUTING (SUPERVISOR SPEC ACTIVE)
-    # =========================================================================
-    if is_supervisor:
-        try:
-            curr_calls = int(st.session_state.state_badge.get("SupCalls", 0))
-            st.session_state.state_badge["SupCalls"] = str(curr_calls + 1)
-        except ValueError:
-            st.session_state.state_badge["SupCalls"] = "1"
 
         # Hierarchy 1: Bench unpowered/cold
         if power_state.startswith("OFF"):
@@ -256,7 +237,24 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             "'Hardware: Online | Lamps: Ignited | Status: LAMP WARMING (2 min / 20 min required)'. "
             "CRITICAL: DO NOT do subtraction math. Stop immediately after reporting software status.]"
         )
-
+    # =========================================================================
+    # 2B. INSTRUMENT WARMUP / WAIT ROUTING (PYTHON STATE OWNERSHIP)
+    # =========================================================================
+    elif any(k in u_lower for k in ["wait", "warm up", "warmup", "stabilize"]):
+        if "OFF" in power_state:
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The spectrophotometer is powered off. "
+                "The lamps cannot warm up while the instrument is unenergized. "
+                "State that the main power switch remains OFF. Do not advise next steps.]"
+            )
+        else:
+            st.session_state.state_badge["Power"] = "READY (20 min)"
+            actual_api_prompt = (
+                f"{user_input} [DIRECTOR NOTE: The analyst allows 20 minutes for lamp stabilization. "
+                "On the PC workstation monitor, the UV-Vis software status updates to: "
+                "'Hardware: Online | Lamps: Stabilized | Status: LAMP READY (>=20 min)'. "
+                "Stop immediately after reporting software status without providing unsolicited advice.]"
+            )
     # =========================================================================
     # 3. BLANKING ROUTING (NARRATOR SPEC ACTIVE)
     # =========================================================================
@@ -637,11 +635,9 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             break
 
     if raw_response:
-        # State Protection: Only physical bench turns monitor optical flags
         if not is_supervisor:
             update_state_from_text(raw_response)
 
-        state_token = extract_state_token(raw_response)
         clean_text = clean_state_token(raw_response)
 
         if clean_text.lower().startswith(user_input.lower()):
@@ -652,12 +648,22 @@ def run_llm_turn(user_input: str, is_supervisor_action: bool = False):
             clean_text = re.sub(r"```[\s\S]*?```", "", clean_text).strip()
             clean_text = f"{clean_text}\n\n```text\n{active_trace_block}\n```"
 
+        # SINGLE SOURCE OF TRUTH: Audit trail badge matches Python state exactly
+        authoritative_state_token = (
+            f"STATE: [Power: {st.session_state.state_badge['Power']} | "
+            f"Blank: {st.session_state.state_badge['Blank']} | "
+            f"Prep: {st.session_state.state_badge['Prep']} | "
+            f"Measured: {st.session_state.state_badge['Measured']} | "
+            f"In-Range: {st.session_state.state_badge['In-Range']} | "
+            f"SupCalls: {st.session_state.state_badge['SupCalls']}]"
+        )
+
         st.session_state.api_messages.append({"role": "user", "content": actual_api_prompt})
-        st.session_state.api_messages.append({"role": "assistant", "content": raw_response})
+        st.session_state.api_messages.append({"role": "assistant", "content": f"{authoritative_state_token}\n\n{clean_text}"})
 
         st.session_state.display_messages.append({"role": "user", "content": user_input})
         st.session_state.display_messages.append(
-            {"role": "assistant", "content": clean_text, "state": state_token}
+            {"role": "assistant", "content": clean_text, "state": authoritative_state_token}
         )
     elif error_fallback:
         st.session_state.display_messages.append({"role": "user", "content": user_input})
