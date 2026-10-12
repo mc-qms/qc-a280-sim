@@ -33,14 +33,25 @@ OPERATING INSTRUCTIONS:
 4. When narrating the supervisor persona, maintain an authentic, professional, audit-weary tone. Keep dialogue concise (3 to 4 sentences maximum), cite specific SOP sections when pointing out deviations, and always end supervisor turns by having them physically exit the bench bay back to the office.
 5. Never hallucinate physical assay data, readings, or calculations that contradict the Director Note. Python owns what must be true; you own the bench atmosphere and dialogue."""
 
+WELCOME_TEXT = (
+    "You are logged into **QC Workstation 4** for release testing of mAb Drug Substance lot **BDS-552** "
+    "using **Test Method TM-0428**.\n\n"
+    "The spectrophotometer is currently powered off (0 min warm-up). Calibrated pipettors, "
+    "10 mm quartz cuvettes, and Formulation Buffer are staged at your bench.\n\n"
+    "Refer to the **TM-0428** method binder in the sidebar to review the analytical procedure and begin testing."
+)
+
 # =============================================================================
 # SESSION STATE INITIALIZATION & RESET
 # =============================================================================
 def reset_entire_workstation():
     """Restores all state badges, intent flags, and audit flags to pristine boot condition."""
-    st.session_state.display_messages = []
+    st.session_state.display_messages = [
+        {"role": "assistant", "content": WELCOME_TEXT}
+    ]
     st.session_state.api_messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "assistant", "content": WELCOME_TEXT}
     ]
     st.session_state.state_badge = {
         "Power": "OFF (0 min)",
@@ -48,7 +59,6 @@ def reset_entire_workstation():
         "Prep": "NONE",
         "Measured": "NO",
         "In-Range": "UNTESTED",
-        "SupCalls": "0",
     }
     st.session_state.last_reading_over_range = False
     st.session_state.last_readings = None
@@ -91,7 +101,6 @@ def run_llm_turn(user_input: str):
     prep_state = st.session_state.state_badge.get("Prep", "NONE")
     measured_state = st.session_state.state_badge.get("Measured", "NO")
     in_range_state = st.session_state.state_badge.get("In-Range", "UNTESTED")
-    sup_calls = int(st.session_state.state_badge.get("SupCalls", "0"))
 
     current_frozen_state = (
         f"[SYSTEM AUDIT TELEMETRY: Power: {power_state} | Blank: {blank_state} | "
@@ -132,9 +141,6 @@ def run_llm_turn(user_input: str):
     # ROUTE 1: SUPERVISOR ESCALATION
     # -------------------------------------------------------------------------
     if any(k in u_lower for k in ["supervisor", "lead"]):
-        sup_calls += 1
-        st.session_state.state_badge["SupCalls"] = str(sup_calls)
-
         if st.session_state.cuvette_contents == "EMPTY" and measured_state == "NO":
             actual_api_prompt = (
                 f"Call Supervisor [DIRECTOR NOTE: Transcribe `{current_frozen_state}` on line 1. "
@@ -425,10 +431,19 @@ def run_llm_turn(user_input: str):
     return actual_api_prompt, is_terminal
 
 # =============================================================================
-# SIDEBAR: METHOD BINDER & TELEMETRY
+# SIDEBAR: AUDIT STATE & METHOD BINDER
 # =============================================================================
 with st.sidebar:
-    st.title("📋 QC Method Binder")
+    st.subheader("🖥️ Hardware Audit State")
+    st.json(st.session_state.state_badge)
+
+    if st.button("🔄 Reset Workstation Bay", use_container_width=True):
+        reset_entire_workstation()
+        st.rerun()
+
+    st.divider()
+
+    st.subheader("📋 QC Method Binder")
     st.caption("Standard Operating Procedure TM-0428 (Rev 04)")
 
     tab1, tab2, tab3, tab4 = st.tabs(["Scope", "Hardware", "Prep", "Calculations"])
@@ -474,14 +489,6 @@ with st.sidebar:
             * **6.5 Release Limits:** BDS-552 release range is **50.0 – 60.0 mg/mL**.
             """
         )
-
-    st.divider()
-    st.subheader("🖥️ Hardware Audit State")
-    st.json(st.session_state.state_badge)
-
-    if st.button("🔄 Reset Workstation Bay", use_container_width=True):
-        reset_entire_workstation()
-        st.rerun()
 
 # =============================================================================
 # MAIN INTERFACE: WORKBENCH CONSOLE
