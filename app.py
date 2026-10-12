@@ -433,10 +433,10 @@ def run_llm_turn(user_input: str):
 # =============================================================================
 # SIDEBAR: AUDIT STATE & METHOD BINDER
 # =============================================================================
-with st.sidebar:
-    st.subheader("🖥️ Hardware Audit State")
-    st.json(st.session_state.state_badge)
-
+st.subheader("🖥️ Hardware Audit State")
+    for param, status in st.session_state.state_badge.items():
+        st.markdown(f"**{param}:** `{status}`")
+        
     if st.button("🔄 Reset Workstation Bay", use_container_width=True):
         reset_entire_workstation()
         st.rerun()
